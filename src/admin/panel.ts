@@ -1,13 +1,16 @@
 import type { Bot } from "grammy";
 import { InlineKeyboard } from "grammy";
 import {
+  BOT_MESSAGE_KEYS,
   BotConfigDocumentSchema,
   DEFAULT_BOT_CONFIG,
   getBotConfig,
+  getBotMsg,
   invalidateBotConfigCache,
   labelForLang,
   setBotConfigDocument,
 } from "../config/botContent.js";
+import type { BotMessageKey } from "../config/botContent.js";
 import { config } from "../config.js";
 import { logger } from "../logger.js";
 import type { Language, MyContext, SessionState } from "../types.js";
@@ -37,6 +40,16 @@ import {
 
 const REP_PAGE = 5;
 
+const MSG_LABEL_KEY: Record<BotMessageKey, string> = {
+  welcome: "admin.msgWelcome",
+  no_profile: "admin.msgNoProfile",
+  match_notify: "admin.msgMatchNotify",
+  profile_saved: "admin.msgProfileSaved",
+  face_submitted: "admin.msgFaceSubmitted",
+  face_approved: "admin.msgFaceApproved",
+  face_rejected: "admin.msgFaceRejected",
+};
+
 const adm = {
   root: "adm:root",
   stats: "adm:st",
@@ -65,6 +78,8 @@ const adm = {
   dim: "adm:dim",
   dimg: "adm:dimg",
   dimd: "adm:dimd",
+  editMessages: "adm:msgedit",
+  msgPick: (key: string) => `adm:msp:${key}`,
 };
 
 function adminLang(ctx: MyContext): Language {
@@ -95,6 +110,8 @@ export function adminRootKb(lang: Language) {
     .row()
     .text(t(lang, "admin.faceQueue"), adm.face)
     .text(t(lang, "admin.botConfig"), adm.cfg)
+    .row()
+    .text(t(lang, "admin.editMessages"), adm.editMessages)
     .row()
     .text(t(lang, "admin.diamonds"), adm.dim);
 }
@@ -185,6 +202,37 @@ export async function tryHandleAdminFollowupMessage(
           ? labelForLang(dm.granted, ulang).replace("{n}", String(Math.abs(delta)))
           : labelForLang(dm.deducted, ulang).replace("{n}", String(delta));
       await ctx.api.sendMessage(notifyTg, body).catch(() => {});
+    }
+    return true;
+  }
+
+  if (s.state === "admin_msg_edit") {
+    const { key, step } = s.payload as { key: string; step: "fa" | "en"; fa?: string };
+    if (txt === "/cancel") {
+      await setSession(u.id, { state: "idle", payload: {} });
+      await ctx.reply(t(lang, "admin.broadcastCancelled"));
+      return true;
+    }
+    if (step === "fa") {
+      await setSession(u.id, { state: "admin_msg_edit", payload: { key, step: "en", fa: txt } });
+      await ctx.reply(t(lang, "admin.msgAskEn"));
+      return true;
+    }
+    if (step === "en") {
+      const faText = (s.payload as { fa?: string }).fa ?? "";
+      const cfg = await getBotConfig();
+      const msgKey = key as BotMessageKey;
+      if (!BOT_MESSAGE_KEYS.includes(msgKey)) {
+        await ctx.reply(t(lang, "admin.cfgUnknownSection"));
+        await setSession(u.id, { state: "idle", payload: {} });
+        return true;
+      }
+      const updatedMessages = { ...DEFAULT_BOT_CONFIG.bot_messages, ...cfg.bot_messages, [msgKey]: { fa: faText, en: txt } };
+      await setBotConfigDocument({ ...cfg, bot_messages: updatedMessages });
+      invalidateBotConfigCache();
+      await setSession(u.id, { state: "idle", payload: {} });
+      await ctx.reply(t(lang, "admin.msgSaved"));
+      return true;
     }
     return true;
   }
@@ -331,16 +379,21 @@ export function setupAdmin(bot: Bot<MyContext>) {
 
   bot.callbackQuery(adm.logToggle, async (ctx) => {
     if (!isAdminTg(ctx.from?.id)) return;
+    const lang = adminLang(ctx);
     const cur = await getSystemSettingBool("message_logging_enabled", true);
     await setSystemSetting("message_logging_enabled", !cur);
-    await ctx.answerCallbackQuery({ text: !cur ? "logging on" : "logging off", show_alert: false });
+    await ctx.answerCallbackQuery({
+      text: t(lang, !cur ? "admin.logOn" : "admin.logOff"),
+      show_alert: false,
+    });
   });
 
   bot.callbackQuery(/^adm:ret:(\d+)$/, async (ctx) => {
     if (!isAdminTg(ctx.from?.id)) return;
+    const lang = adminLang(ctx);
     const h = Number(ctx.match?.[1]);
     await setSystemSetting("message_log_retention_hours", h);
-    await ctx.answerCallbackQuery({ text: `retention ${h}h`, show_alert: false });
+    await ctx.answerCallbackQuery({ text: tf(lang, "admin.retSet", { h }), show_alert: false });
   });
 
   bot.callbackQuery(adm.logPurge, async (ctx) => {
@@ -372,7 +425,12 @@ export function setupAdmin(bot: Bot<MyContext>) {
     }
     const kb = new InlineKeyboard();
     for (const p of pending) {
-      kb.text(`#${p.id} user ${p.user_id}`, adm.fap(Number(p.id))).text("R", adm.far(Number(p.id))).row();
+      kb.text(
+        tf(lang, "admin.faceRow", { id: p.id, uid: p.user_id }),
+        adm.fap(Number(p.id))
+      )
+        .text("R", adm.far(Number(p.id)))
+        .row();
     }
     kb.text(t(lang, "admin.back"), adm.root);
     await ctx.reply(t(lang, "admin.facePick"), { reply_markup: kb });
@@ -380,18 +438,25 @@ export function setupAdmin(bot: Bot<MyContext>) {
 
   bot.callbackQuery(/^adm:fap:(\d+)$/, async (ctx) => {
     if (!isAdminTg(ctx.from?.id)) return;
+    const lang = adminLang(ctx);
     const id = Number(ctx.match?.[1]);
     await ctx.answerCallbackQuery();
     const uid = await getPendingFaceSubmissionUserId(id);
     if (uid == null) return;
     await approveFaceSubmission({ submissionId: id, reviewerTelegramId: ctx.from!.id });
-    const tg = await getTelegramIdByUserId(uid);
-    if (tg) await ctx.api.sendMessage(tg, t(adminLang(ctx), "face.approved")).catch(() => {});
-    await ctx.reply("OK approved #" + id);
+    if (uid != null) {
+      const tg = await getTelegramIdByUserId(uid);
+      const cfg = await getBotConfig();
+      const targetRow = await getUserById(uid);
+      const ulang: Language = targetRow?.language === "fa" ? "fa" : "en";
+      if (tg) await ctx.api.sendMessage(tg, getBotMsg(cfg, "face_approved", ulang)).catch(() => {});
+    }
+    await ctx.reply(tf(lang, "admin.faceApproved", { id }));
   });
 
   bot.callbackQuery(/^adm:far:(\d+)$/, async (ctx) => {
     if (!isAdminTg(ctx.from?.id)) return;
+    const lang = adminLang(ctx);
     const id = Number(ctx.match?.[1]);
     await ctx.answerCallbackQuery();
     const uid = await getPendingFaceSubmissionUserId(id);
@@ -402,9 +467,12 @@ export function setupAdmin(bot: Bot<MyContext>) {
     });
     if (uid != null) {
       const tg = await getTelegramIdByUserId(uid);
-      if (tg) await ctx.api.sendMessage(tg, t(adminLang(ctx), "face.rejected")).catch(() => {});
+      const cfg = await getBotConfig();
+      const targetRow = await getUserById(uid);
+      const ulang: Language = targetRow?.language === "fa" ? "fa" : "en";
+      if (tg) await ctx.api.sendMessage(tg, getBotMsg(cfg, "face_rejected", ulang)).catch(() => {});
     }
-    await ctx.reply("OK rejected #" + id);
+    await ctx.reply(tf(lang, "admin.faceRejected", { id }));
   });
 
   bot.callbackQuery(adm.cfg, async (ctx) => {
@@ -451,6 +519,37 @@ export function setupAdmin(bot: Bot<MyContext>) {
   bot.callbackQuery(adm.cfgExplorerMore, cfgWait("explorer_more"));
   bot.callbackQuery(adm.cfgSettings, cfgWait("settings"));
   bot.callbackQuery(adm.cfgStats, cfgWait("stats"));
+
+  bot.callbackQuery(adm.editMessages, async (ctx) => {
+    if (!isAdminTg(ctx.from?.id)) return;
+    const lang = adminLang(ctx);
+    await ctx.answerCallbackQuery();
+    const kb = new InlineKeyboard();
+    for (const key of BOT_MESSAGE_KEYS) {
+      kb.text(t(lang, MSG_LABEL_KEY[key]), adm.msgPick(key)).row();
+    }
+    kb.text(t(lang, "admin.back"), adm.root);
+    await ctx.editMessageText(t(lang, "admin.msgMenu"), { reply_markup: kb });
+  });
+
+  bot.callbackQuery(/^adm:msp:(.+)$/, async (ctx) => {
+    if (!isAdminTg(ctx.from?.id)) return;
+    const lang = adminLang(ctx);
+    const key = ctx.match?.[1] ?? "";
+    if (!BOT_MESSAGE_KEYS.includes(key as BotMessageKey)) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+    const cfg = await getBotConfig();
+    const current = cfg.bot_messages?.[key as BotMessageKey] ?? DEFAULT_BOT_CONFIG.bot_messages[key as BotMessageKey];
+    await ctx.answerCallbackQuery();
+    const u = await getUserByTelegramId(ctx.from!.id);
+    if (!u) return;
+    await setSession(u.id, { state: "admin_msg_edit", payload: { key, step: "fa" } });
+    await ctx.reply(
+      tf(lang, "admin.msgCurrent", { fa: current.fa, en: current.en })
+    );
+  });
 
   bot.callbackQuery(adm.dim, async (ctx) => {
     if (!isAdminTg(ctx.from?.id)) return;

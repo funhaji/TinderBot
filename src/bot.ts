@@ -1,6 +1,6 @@
 import { Bot, InlineKeyboard } from "grammy";
 import { setupAdmin, tryHandleAdminFollowupMessage } from "./admin/panel.js";
-import { ensureBotConfigSeeded, getBotConfig, labelForLang } from "./config/botContent.js";
+import { ensureBotConfigSeeded, getBotConfig, getBotMsg, labelForLang } from "./config/botContent.js";
 import type { HomeMenuAction } from "./config/botContent.js";
 import { config } from "./config.js";
 import { formatDiscoverCaption, explorerMarkup, registerExplorerCallbacks } from "./features/explorer.js";
@@ -222,7 +222,7 @@ async function dispatchHomeAction(
     case "verify_face":
       await setSession(u.id, { state: "face_verify_wait", payload: {} });
       await ctx.reply(t(lang, "face.askPhoto"), {
-        reply_markup: new InlineKeyboard().text(lang === "fa" ? "انصراف ❌" : "Cancel ❌", "face:cancel"),
+        reply_markup: new InlineKeyboard().text(t(lang, "wizard.cancel"), "face:cancel"),
       });
       break;
     case "placeholder":
@@ -236,7 +236,8 @@ async function discoverStart(ctx: MyContext, userId: number) {
   await ctx.api.sendChatAction(ctx.chat!.id, "typing").catch(() => {});
   const p = await getProfile(userId);
   if (!p) {
-    await ctx.reply(t(lang, "profile.need"));
+    const cfgNp = await getBotConfig();
+    await ctx.reply(getBotMsg(cfgNp, "no_profile", lang));
     await startProfileWizard(ctx, userId);
     return;
   }
@@ -340,6 +341,7 @@ async function renderDiscoverCard(ctx: MyContext, userId: number) {
 }
 
 async function notifyMatch(ctx: MyContext, swiperId: number, targetId: number) {
+  const cfg = await getBotConfig();
   const targetP = await getProfile(targetId);
   const swiperP = await getProfile(swiperId);
   const targetUser = await getUserById(targetId);
@@ -348,10 +350,10 @@ async function notifyMatch(ctx: MyContext, swiperId: number, targetId: number) {
   const swiperLang = langFromDb(swiperUser?.language);
   if (targetP?.preferences.notify_match !== false) {
     const otherTg = await getTelegramIdByUserId(targetId);
-    if (otherTg) await ctx.api.sendMessage(otherTg, t(targetLang, "match.notify")).catch(() => {});
+    if (otherTg) await ctx.api.sendMessage(otherTg, getBotMsg(cfg, "match_notify", targetLang)).catch(() => {});
   }
   if (swiperP?.preferences.notify_match !== false) {
-    await ctx.reply(t(swiperLang, "match.notify"));
+    await ctx.reply(getBotMsg(cfg, "match_notify", swiperLang));
   }
 }
 
@@ -567,6 +569,11 @@ export async function createBot() {
     const s = await getSession(u.id);
     const lang = adminLangFromCtx(ctx);
 
+    if (s.state === "admin_msg_edit") {
+      if (await tryHandleAdminFollowupMessage(ctx, u, s, lang)) return;
+      return next();
+    }
+
     if (s.state === "admin_broadcast") {
       const txt = ctx.message.text?.trim();
       if (txt === "/cancel") {
@@ -640,7 +647,8 @@ export async function createBot() {
       s.state === "admin_broadcast" ||
       s.state === "admin_find" ||
       s.state === "admin_config_wait" ||
-      s.state === "admin_diamond_wait"
+      s.state === "admin_diamond_wait" ||
+      s.state === "admin_msg_edit"
     )
       return next();
     if (s.state !== "chat") return next();
@@ -733,7 +741,8 @@ export async function createBot() {
       s.state === "admin_broadcast" ||
       s.state === "admin_find" ||
       s.state === "admin_config_wait" ||
-      s.state === "admin_diamond_wait"
+      s.state === "admin_diamond_wait" ||
+      s.state === "admin_msg_edit"
     ) {
       await resetSession(u.id);
       await ctx.reply(t(lang, "admin.broadcastCancelled"));
@@ -914,8 +923,9 @@ export async function createBot() {
 
   bot.callbackQuery("stat:extra", async (ctx) => {
     const lang = await getLang(ctx);
+    const cfgTst = await getBotConfig();
     await ctx.answerCallbackQuery({
-      text: lang === "fa" ? "به‌زودی." : "Coming soon.",
+      text: labelForLang(cfgTst.placeholder_toast, lang),
       show_alert: false,
     });
   });
@@ -1073,7 +1083,7 @@ export async function createBot() {
         return;
       }
       await ctx.answerCallbackQuery({
-        text: x.lang === "fa" ? "اولین کارت است." : "This is the first card.",
+        text: t(x.lang, "discover.firstCard"),
         show_alert: false,
       });
     },
@@ -1210,7 +1220,7 @@ export async function createBot() {
     const lang = await getLang(ctx);
     await ctx.answerCallbackQuery();
     await ctx.reply(t(lang, "profile.ask.location"), {
-      reply_markup: new InlineKeyboard().text(lang === "fa" ? "رد کردن" : "Skip", "loc:skip"),
+      reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "loc:skip"),
     });
   });
 
@@ -1225,7 +1235,8 @@ export async function createBot() {
       s.state === "admin_broadcast" ||
       s.state === "admin_find" ||
       s.state === "admin_config_wait" ||
-      s.state === "admin_diamond_wait"
+      s.state === "admin_diamond_wait" ||
+      s.state === "admin_msg_edit"
     )
       return;
 
@@ -1233,7 +1244,7 @@ export async function createBot() {
 
     if (s.state === "face_verify_wait") {
       await ctx.reply(t(lang, "face.askPhoto"), {
-        reply_markup: new InlineKeyboard().text(lang === "fa" ? "انصراف ❌" : "Cancel ❌", "face:cancel"),
+        reply_markup: new InlineKeyboard().text(t(lang, "wizard.cancel"), "face:cancel"),
       });
       return;
     }
@@ -1252,7 +1263,8 @@ export async function createBot() {
     if (s.state === "idle") {
       const p = await getProfile(u.id);
       if (!p) {
-        await ctx.reply(t(lang, "profile.need"));
+        const cfgIdle = await getBotConfig();
+        await ctx.reply(getBotMsg(cfgIdle, "no_profile", lang));
         await startProfileWizard(ctx, u.id);
         return;
       }
@@ -1315,7 +1327,7 @@ export async function createBot() {
     await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     const lang = await getLang(ctx);
     await ctx.reply(t(lang, "profile.ask.bio"), {
-      reply_markup: new InlineKeyboard().text(lang === "fa" ? "رد کردن" : "Skip", "bio:skip"),
+      reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "bio:skip"),
     });
   });
 
@@ -1331,7 +1343,7 @@ export async function createBot() {
     const lang = await getLang(ctx);
     await ctx.answerCallbackQuery();
     await ctx.reply(t(lang, "profile.ask.bio"), {
-      reply_markup: new InlineKeyboard().text(lang === "fa" ? "رد کردن" : "Skip", "bio:skip"),
+      reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "bio:skip"),
     });
   });
 
@@ -1356,7 +1368,7 @@ export async function createBot() {
         (selected.includes(i.key) ? "✅ " : "") + (lang === "fa" ? i.fa_label : i.en_label);
       kb.text(label, cb.interestToggle(i.key)).row();
     }
-    kb.text(lang === "fa" ? "تمام" : "Done", cb.interestDone);
+    kb.text(t(lang, "wizard.done"), cb.interestDone);
     await ctx.reply(t(lang, "profile.ask.interests"), { reply_markup: kb });
   }
 
@@ -1382,7 +1394,7 @@ export async function createBot() {
         (selected.includes(i.key) ? "✅ " : "") + (lang === "fa" ? i.fa_label : i.en_label);
       kb.text(label, cb.interestToggle(i.key)).row();
     }
-    kb.text(lang === "fa" ? "تمام" : "Done", cb.interestDone);
+    kb.text(t(lang, "wizard.done"), cb.interestDone);
     await ctx.editMessageReplyMarkup({ reply_markup: kb });
   });
 
@@ -1397,7 +1409,7 @@ export async function createBot() {
     const lang = await getLang(ctx);
     await ctx.answerCallbackQuery();
     await ctx.reply(t(lang, "profile.ask.photos"), {
-      reply_markup: new InlineKeyboard().text(lang === "fa" ? "تمام ✅" : "Done ✅", "photos:done"),
+      reply_markup: new InlineKeyboard().text(t(lang, "wizard.doneFull"), "photos:done"),
     });
   });
 
@@ -1413,7 +1425,8 @@ export async function createBot() {
     if (s.state === "face_verify_wait") {
       const subId = await createFaceSubmission(u.id, fileId);
       await resetSession(u.id);
-      await ctx.reply(t(lang, "face.submitted"));
+      const cfgFace = await getBotConfig();
+      await ctx.reply(getBotMsg(cfgFace, "face_submitted", lang));
       for (const adminTgId of config.adminTelegramIdSet) {
         const caption = `Face verification #${subId}\nUser DB id: ${u.id} | tg: ${ctx.from!.id}${ctx.from!.username ? " @" + ctx.from!.username : ""}`;
         const kb = new InlineKeyboard()
@@ -1428,15 +1441,15 @@ export async function createBot() {
     if (s.payload.step !== "photos") return;
     const list = s.payload.draft.photoFileIds ?? [];
     if (list.length >= 3) {
-      await ctx.reply(lang === "fa" ? "حداکثر ۳ عکس." : "Max 3 photos.");
+      await ctx.reply(t(lang, "photo.max"));
       return;
     }
     list.push(fileId);
     s.payload.draft.photoFileIds = list;
     await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     await ctx.reply(
-      lang === "fa" ? `ثبت شد (${list.length}/3).` : `Saved (${list.length}/3).`,
-      { reply_markup: new InlineKeyboard().text(lang === "fa" ? "تمام ✅" : "Done ✅", "photos:done") }
+      tf(lang, "photo.saved", { n: list.length }),
+      { reply_markup: new InlineKeyboard().text(t(lang, "wizard.doneFull"), "photos:done") }
     );
   });
 
@@ -1494,7 +1507,8 @@ export async function createBot() {
       });
       await markReferralBonusPaid(u.id);
     }
-    await ctx.reply(t(lang, "profile.saved"));
+    const cfgSv1 = await getBotConfig();
+    await ctx.reply(getBotMsg(cfgSv1, "profile_saved", lang));
     await sendMainMenuReply(ctx);
   });
 
@@ -1555,7 +1569,8 @@ export async function createBot() {
       });
       await markReferralBonusPaid(u.id);
     }
-    await ctx.reply(t(lang, "profile.saved"));
+    const cfgSv2 = await getBotConfig();
+    await ctx.reply(getBotMsg(cfgSv2, "profile_saved", lang));
     await sendMainMenuReply(ctx);
   });
 
@@ -1565,7 +1580,7 @@ export async function createBot() {
     await resetSession(u.id);
     await ctx.answerCallbackQuery();
     const lang = await getLang(ctx);
-    await ctx.reply(lang === "fa" ? "احراز چهره لغو شد." : "Face verification cancelled.");
+    await ctx.reply(t(lang, "face.cancelled"));
     await sendMainMenuReply(ctx);
   });
 
@@ -1576,7 +1591,8 @@ export async function createBot() {
     const p = await getProfile(u.id);
     if (!p) {
       const lang = await getLang(ctx);
-      await ctx.reply(t(lang, "profile.need"));
+      const cfgPr = await getBotConfig();
+      await ctx.reply(getBotMsg(cfgPr, "no_profile", lang));
       await startProfileWizard(ctx, u.id);
       return;
     }

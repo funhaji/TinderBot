@@ -75,10 +75,30 @@ export const BotConfigDocumentSchema = z.object({
     granted: LangPairSchema,
     deducted: LangPairSchema,
   }),
+  bot_messages: z.object({
+    welcome: LangPairSchema,
+    no_profile: LangPairSchema,
+    match_notify: LangPairSchema,
+    profile_saved: LangPairSchema,
+    face_submitted: LangPairSchema,
+    face_approved: LangPairSchema,
+    face_rejected: LangPairSchema,
+  }).optional(),
 });
 
 export type BotConfigDocument = z.infer<typeof BotConfigDocumentSchema>;
 export type HomeMenuAction = z.infer<typeof HomeActionSchema>;
+
+export const BOT_MESSAGE_KEYS = [
+  "welcome",
+  "no_profile",
+  "match_notify",
+  "profile_saved",
+  "face_submitted",
+  "face_approved",
+  "face_rejected",
+] as const;
+export type BotMessageKey = typeof BOT_MESSAGE_KEYS[number];
 
 export const DEFAULT_BOT_CONFIG: BotConfigDocument = {
   v: 1,
@@ -157,6 +177,15 @@ export const DEFAULT_BOT_CONFIG: BotConfigDocument = {
     granted: { fa: "الماس دریافت شد: +{n}", en: "Diamonds received: +{n}" },
     deducted: { fa: "الماس کم شد: {n}", en: "Diamonds deducted: {n}" },
   },
+  bot_messages: {
+    welcome: { fa: "منو", en: "Menu" },
+    no_profile: { fa: "اول پروفایل‌ات را بسازیم.", en: "Let's create your profile first." },
+    match_notify: { fa: "مچ شدید! 🎉", en: "It's a match! 🎉" },
+    profile_saved: { fa: "پروفایل ذخیره شد.", en: "Profile saved." },
+    face_submitted: { fa: "درخواست ثبت شد؛ بعد از بررسی اطلاع می‌دهیم.", en: "Submitted; we will notify you after review." },
+    face_approved: { fa: "احراز چهره تأیید شد. ✅", en: "Face verification approved. ✅" },
+    face_rejected: { fa: "احراز چهره رد شد؛ می‌توانی دوباره تلاش کنی.", en: "Face verification rejected; you can try again." },
+  },
 };
 
 let cache: { doc: BotConfigDocument; loadedAt: number } | null = null;
@@ -202,4 +231,9 @@ export async function ensureBotConfigSeeded() {
 
 export function labelForLang(pair: { fa: string; en: string }, lang: "fa" | "en"): string {
   return lang === "fa" ? pair.fa : pair.en;
+}
+
+export function getBotMsg(cfg: BotConfigDocument, key: BotMessageKey, lang: "fa" | "en"): string {
+  const pair = cfg.bot_messages?.[key] ?? DEFAULT_BOT_CONFIG.bot_messages[key];
+  return labelForLang(pair, lang);
 }

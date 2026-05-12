@@ -10,6 +10,7 @@ export type SessionState =
   | { state: "admin_broadcast"; payload: Record<string, unknown> }
   | { state: "admin_find"; payload: Record<string, unknown> }
   | { state: "admin_config_wait"; payload: { section: string } }
+  | { state: "admin_msg_edit"; payload: { key: string; step: "fa" | "en"; fa?: string } }
   | { state: "face_verify_wait"; payload: Record<string, unknown> }
   | { state: "admin_diamond_wait"; payload: { mode: "grant" | "deduct" } };
 

@@ -149,7 +149,7 @@ export function seekGenderKeyboard(lang: Language, selected: Set<string>) {
     const label = (selected.has(o.key) ? "✅ " : "") + (lang === "fa" ? o.fa : o.en);
     kb.text(label, cb.seekToggle(o.key)).row();
   }
-  kb.text(lang === "fa" ? "تمام" : "Done", cb.seekDone);
+  kb.text(t(lang, "wizard.done"), cb.seekDone);
   return kb;
 }
 
@@ -181,6 +181,6 @@ export function wizardSeekKeyboard(lang: Language, selected: Set<string>) {
     const label = (selected.has(o.key) ? "✅ " : "") + (lang === "fa" ? o.fa : o.en);
     kb.text(label, cb.wizardSeekToggle(o.key)).row();
   }
-  kb.text(lang === "fa" ? "تمام" : "Done", cb.wizardSeekDone);
+  kb.text(t(lang, "wizard.done"), cb.wizardSeekDone);
   return kb;
 }
