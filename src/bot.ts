@@ -1212,7 +1212,7 @@ export async function createBot() {
     });
   });
 
-  bot.on("message:text", async (ctx) => {
+  bot.on("message:text", async (ctx, next) => {
     const u = await ensureDbUser(ctx);
     if (!u) return;
     const lang = langFromDb(u.language);
@@ -1308,7 +1308,9 @@ export async function createBot() {
     s.payload.step = "bio";
     await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     const lang = await getLang(ctx);
-    await ctx.reply(t(lang, "profile.ask.bio"));
+    await ctx.reply(t(lang, "profile.ask.bio"), {
+      reply_markup: new InlineKeyboard().text(lang === "fa" ? "رد کردن" : "Skip", "bio:skip"),
+    });
   });
 
   bot.callbackQuery("loc:skip", async (ctx) => {
@@ -1322,7 +1324,22 @@ export async function createBot() {
     await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     const lang = await getLang(ctx);
     await ctx.answerCallbackQuery();
-    await ctx.reply(t(lang, "profile.ask.bio"));
+    await ctx.reply(t(lang, "profile.ask.bio"), {
+      reply_markup: new InlineKeyboard().text(lang === "fa" ? "رد کردن" : "Skip", "bio:skip"),
+    });
+  });
+
+  bot.callbackQuery("bio:skip", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    if (s.state !== "profile_wizard" || s.payload.step !== "bio") return;
+    s.payload.draft.bio = "";
+    s.payload.step = "interests";
+    await setSession(u.id, { state: "profile_wizard", payload: s.payload });
+    const lang = await getLang(ctx);
+    await ctx.answerCallbackQuery();
+    await sendInterestsPicker(ctx, lang, []);
   });
 
   async function sendInterestsPicker(ctx: MyContext, lang: Language, selected: string[]) {
@@ -1373,7 +1390,9 @@ export async function createBot() {
     await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     const lang = await getLang(ctx);
     await ctx.answerCallbackQuery();
-    await ctx.reply(t(lang, "profile.ask.photos"));
+    await ctx.reply(t(lang, "profile.ask.photos"), {
+      reply_markup: new InlineKeyboard().text(lang === "fa" ? "تمام ✅" : "Done ✅", "photos:done"),
+    });
   });
 
   bot.on("message:photo", async (ctx) => {
@@ -1402,7 +1421,10 @@ export async function createBot() {
     list.push(fileId);
     s.payload.draft.photoFileIds = list;
     await setSession(u.id, { state: "profile_wizard", payload: s.payload });
-    await ctx.reply(lang === "fa" ? `ثبت شد (${list.length}/3).` : `Saved (${list.length}/3).`);
+    await ctx.reply(
+      lang === "fa" ? `ثبت شد (${list.length}/3).` : `Saved (${list.length}/3).`,
+      { reply_markup: new InlineKeyboard().text(lang === "fa" ? "تمام ✅" : "Done ✅", "photos:done") }
+    );
   });
 
   bot.command("done", async (ctx) => {
@@ -1417,6 +1439,67 @@ export async function createBot() {
       await ctx.reply(t(lang, "errors.generic"));
       return;
     }
+    const fileIds = d.photoFileIds ?? [];
+    const lf = d.lookingFor ?? "both";
+    const prefs = {
+      looking_for: lf,
+      seek_genders: d.seekGenders ?? [],
+      age_min: 18,
+      age_max: 99,
+    };
+    await upsertProfile(u.id, {
+      display_name: d.displayName,
+      age: d.age,
+      city: d.city,
+      bio: d.bio ?? "",
+      visibility: true,
+      preferences: prefs,
+      gender: d.gender ?? null,
+      location_lat: d.location?.lat ?? null,
+      location_lon: d.location?.lon ?? null,
+    });
+    await setUserInterests(u.id, d.interestKeys ?? []);
+    await replacePhotos(u.id, fileIds);
+    await resetSession(u.id);
+    const profileReward = await getSystemSettingNumber("diamond_reward_profile", 10);
+    await adjustDiamondBalance({
+      userId: u.id,
+      delta: profileReward,
+      reason: "profile_complete",
+      adminTelegramId: null,
+      refJson: {},
+    });
+    const full = await getUserById(u.id);
+    if (full?.referred_by && !full.referral_bonus_paid) {
+      const refReward = await getSystemSettingNumber("diamond_reward_referral", 5);
+      await adjustDiamondBalance({
+        userId: full.referred_by,
+        delta: refReward,
+        reason: "referral_profile_complete",
+        adminTelegramId: null,
+        refJson: { referred_user_id: u.id },
+      });
+      await markReferralBonusPaid(u.id);
+    }
+    await ctx.reply(t(lang, "profile.saved"));
+    await sendMainMenuReply(ctx);
+  });
+
+  bot.callbackQuery("photos:done", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    if (s.state !== "profile_wizard" || s.payload.step !== "photos") {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+    const lang = langFromDb(u.language);
+    const d = s.payload.draft;
+    if (!d.displayName || !d.age || !d.city) {
+      await ctx.answerCallbackQuery({ text: t(lang, "errors.generic"), show_alert: true });
+      return;
+    }
+    await ctx.answerCallbackQuery();
     const fileIds = d.photoFileIds ?? [];
     const lf = d.lookingFor ?? "both";
     const prefs = {
