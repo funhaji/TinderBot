@@ -350,10 +350,14 @@ async function notifyMatch(ctx: MyContext, swiperId: number, targetId: number) {
   const swiperLang = langFromDb(swiperUser?.language);
   if (targetP?.preferences.notify_match !== false) {
     const otherTg = await getTelegramIdByUserId(targetId);
-    if (otherTg) await ctx.api.sendMessage(otherTg, getBotMsg(cfg, "match_notify", targetLang)).catch(() => {});
+    if (otherTg) {
+      const kb = new InlineKeyboard().text(t(targetLang, "match.chatNow"), cb.matchChat(swiperId));
+      await ctx.api.sendMessage(otherTg, getBotMsg(cfg, "match_notify", targetLang), { reply_markup: kb }).catch(() => {});
+    }
   }
   if (swiperP?.preferences.notify_match !== false) {
-    await ctx.reply(getBotMsg(cfg, "match_notify", swiperLang));
+    const kb = new InlineKeyboard().text(t(swiperLang, "match.chatNow"), cb.matchChat(targetId));
+    await ctx.reply(getBotMsg(cfg, "match_notify", swiperLang), { reply_markup: kb });
   }
 }
 
@@ -622,13 +626,18 @@ export async function createBot() {
         await ctx.reply(t(lang, "admin.userNotFound"));
         return;
       }
+      const userKb = new InlineKeyboard()
+        .text(t(lang, "admin.resetNopes"), `adm:rnopes:${target.id}`)
+        .row()
+        .text(t(lang, target.is_banned ? "admin.unban" : "admin.ban"), `adm:usrban:${target.id}:${target.is_banned ? 0 : 1}`);
       await ctx.reply(
         tf(lang, "admin.userLine", {
           id: target.id,
           tg: target.telegram_id,
           username: target.username ?? "—",
           banned: target.is_banned ? "yes" : "no",
-        })
+        }),
+        { reply_markup: userKb }
       );
       return;
     }

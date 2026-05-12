@@ -428,7 +428,9 @@ export async function discoveryCandidates(params: {
       SELECT p.* FROM profiles p WHERE p.user_id = $1
     ),
     already AS (
-      SELECT target_id AS id FROM swipes WHERE swiper_id = $1
+      SELECT target_id AS id FROM swipes
+      WHERE swiper_id = $1
+        AND (direction = 1 OR created_at > now() - INTERVAL '30 days')
     ),
     blocked AS (
       SELECT blocked_id AS id FROM user_blocks WHERE blocker_id = $1
@@ -681,6 +683,10 @@ export async function addPermanentHide(hiderId: number, hiddenId: number) {
     `INSERT INTO user_permanent_hides (hider_id, hidden_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
     [hiderId, hiddenId]
   );
+}
+
+export async function resetUserNopes(userId: number) {
+  await query(`DELETE FROM swipes WHERE swiper_id = $1 AND direction = 2`, [userId]);
 }
 
 export async function getPendingFaceSubmissionUserId(submissionId: number): Promise<number | null> {

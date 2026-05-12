@@ -19,6 +19,7 @@ import {
   adjustDiamondBalance,
   approveFaceSubmission,
   banUser,
+  unbanUser,
   countMatches,
   countOpenReports,
   countUsers,
@@ -32,6 +33,7 @@ import {
   purgeAllMessageLogs,
   rejectFaceSubmission,
   resolveReport,
+  resetUserNopes,
   setProfileVisibility,
   setSession,
   getSystemSettingBool,
@@ -582,5 +584,32 @@ export function setupAdmin(bot: Bot<MyContext>) {
     if (!u) return;
     await setSession(u.id, { state: "admin_diamond_wait", payload: { mode: "deduct" } });
     await ctx.reply(t(lang, "admin.diamondPrompt"));
+  });
+
+  bot.callbackQuery(/^adm:rnopes:(\d+)$/, async (ctx) => {
+    if (!isAdminTg(ctx.from?.id)) return;
+    const lang = adminLang(ctx);
+    const targetId = Number(ctx.match?.[1]);
+    await ctx.answerCallbackQuery();
+    await resetUserNopes(targetId);
+    logger.info({ targetId, admin: ctx.from!.id }, "admin_reset_nopes");
+    await ctx.reply(t(lang, "admin.nopesReset"));
+  });
+
+  bot.callbackQuery(/^adm:usrban:(\d+):(0|1)$/, async (ctx) => {
+    if (!isAdminTg(ctx.from?.id)) return;
+    const lang = adminLang(ctx);
+    const targetId = Number(ctx.match?.[1]);
+    const doBan = ctx.match?.[2] === "1";
+    await ctx.answerCallbackQuery();
+    if (doBan) {
+      await banUser(targetId, "admin");
+      logger.warn({ targetId, admin: ctx.from!.id }, "admin_ban");
+      await ctx.reply(t(lang, "admin.ban"));
+    } else {
+      await unbanUser(targetId);
+      logger.info({ targetId, admin: ctx.from!.id }, "admin_unban");
+      await ctx.reply(t(lang, "admin.unban"));
+    }
   });
 }

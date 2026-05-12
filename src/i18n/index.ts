@@ -113,6 +113,8 @@ const fa: Dict = {
   "explore.likeBlocked": "این کاربر فقط از افراد تأییدشده لایک می‌پذیرد.",
   "explore.likeDirectPending": "اگر طرف تو را لایک کند اطلاع می‌دهیم.",
 
+  "match.chatNow": "چت الان 💬",
+
   "admin.denied": "دسترسی ندارید.",
   "admin.menu": "پنل ادمین",
   "admin.stats": "📊 آمار کل",
@@ -125,6 +127,7 @@ const fa: Dict = {
   "admin.reportRow": "هدف: {target} | گزارش‌کننده: {reporter}",
   "admin.dismiss": "رد کردن",
   "admin.ban": "مسدود",
+  "admin.unban": "رفع مسدودیت",
   "admin.hide": "مخفی پروفایل",
   "admin.userLine": "DB #{id} | TG `{tg}` | @{username}\nمسدود: {banned}",
   "admin.broadcastPrompt": "پیامی که می‌خواهی برای همه کپی شود را بفرست (متن، عکس، …). /cancel برای لغو",
@@ -166,6 +169,8 @@ const fa: Dict = {
   "admin.diamondPrompt": "بفرست: telegramUserId مقدار (مثال: 123456789 50) /cancel",
   "admin.diamondBadFormat": "فرمت: telegramUserId فاصله مقدار",
   "admin.diamondDone": "انجام شد. delta={delta} user={userId}",
+  "admin.resetNopes": "🔄 بازنشانی نوپ‌ها",
+  "admin.nopesReset": "نوپ‌های کاربر بازنشانی شد.",
   "admin.editMessages": "✏️ ویرایش پیام‌ها",
   "admin.msgMenu": "پیام مورد نظر را انتخاب کن:",
   "admin.msgCurrent": "مقدار فعلی:\nFA: {fa}\nEN: {en}\n\nمتن فارسی جدید را بفرست (/cancel برای لغو):",
@@ -291,6 +296,8 @@ const en: Dict = {
   "explore.likeBlocked": "This user only accepts likes from verified profiles.",
   "explore.likeDirectPending": "If they like you back we will notify you.",
 
+  "match.chatNow": "Chat now 💬",
+
   "admin.denied": "Access denied.",
   "admin.menu": "Admin panel",
   "admin.stats": "📊 Global stats",
@@ -303,6 +310,7 @@ const en: Dict = {
   "admin.reportRow": "Target: {target} | Reporter: {reporter}",
   "admin.dismiss": "Dismiss",
   "admin.ban": "Ban",
+  "admin.unban": "Unban",
   "admin.hide": "Hide profile",
   "admin.userLine": "DB #{id} | TG `{tg}` | @{username}\nBanned: {banned}",
   "admin.broadcastPrompt": "Send the message to copy to everyone (text, photo, …). /cancel to abort",
@@ -344,6 +352,8 @@ const en: Dict = {
   "admin.diamondPrompt": "Send: telegramUserId amount (e.g. 123456789 50) /cancel",
   "admin.diamondBadFormat": "Format: telegramUserId space amount",
   "admin.diamondDone": "Done. delta={delta} user={userId}",
+  "admin.resetNopes": "🔄 Reset nopes",
+  "admin.nopesReset": "User nopes reset.",
   "admin.editMessages": "✏️ Edit Messages",
   "admin.msgMenu": "Pick a message to edit:",
   "admin.msgCurrent": "Current value:\nFA: {fa}\nEN: {en}\n\nSend new FA text (/cancel to abort):",
