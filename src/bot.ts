@@ -1291,6 +1291,10 @@ export async function createBot() {
       await sendInterestsPicker(ctx, lang, payload.draft.interestKeys ?? []);
       return;
     }
+
+    if (payload.step === "photos") {
+      return next();
+    }
   });
 
   bot.on("message:location", async (ctx) => {
@@ -1414,10 +1418,6 @@ export async function createBot() {
       return;
     }
     const fileIds = d.photoFileIds ?? [];
-    if (fileIds.length === 0) {
-      await ctx.reply(lang === "fa" ? "حداقل یک عکس ارسال کن." : "Please send at least one photo.");
-      return;
-    }
     const lf = d.lookingFor ?? "both";
     const prefs = {
       looking_for: lf,
