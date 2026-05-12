@@ -1229,6 +1229,8 @@ export async function createBot() {
     )
       return;
 
+    if (ctx.msg.text.startsWith("/")) return next();
+
     if (s.state === "face_verify_wait") {
       await ctx.reply(t(lang, "face.askPhoto"), {
         reply_markup: new InlineKeyboard().text(lang === "fa" ? "انصراف ❌" : "Cancel ❌", "face:cancel"),
