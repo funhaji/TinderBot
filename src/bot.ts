@@ -221,7 +221,9 @@ async function dispatchHomeAction(
       break;
     case "verify_face":
       await setSession(u.id, { state: "face_verify_wait", payload: {} });
-      await ctx.reply(t(lang, "face.askPhoto"));
+      await ctx.reply(t(lang, "face.askPhoto"), {
+        reply_markup: new InlineKeyboard().text(lang === "fa" ? "انصراف ❌" : "Cancel ❌", "face:cancel"),
+      });
       break;
     case "placeholder":
     default:
@@ -231,7 +233,7 @@ async function dispatchHomeAction(
 
 async function discoverStart(ctx: MyContext, userId: number) {
   const lang = await getLang(ctx);
-  await ctx.sendChatAction("typing");
+  await ctx.api.sendChatAction(ctx.chat!.id, "typing").catch(() => {});
   const p = await getProfile(userId);
   if (!p) {
     await ctx.reply(t(lang, "profile.need"));
@@ -408,7 +410,7 @@ async function handleSwipe(ctx: MyContext, direction: 1 | 2) {
 
 async function showMatches(ctx: MyContext, userId: number) {
   const lang = await getLang(ctx);
-  await ctx.sendChatAction("typing");
+  await ctx.api.sendChatAction(ctx.chat!.id, "typing").catch(() => {});
   const matches = await listMatchesFor(userId);
   if (matches.length === 0) {
     await ctx.reply(t(lang, "matches.none"));
@@ -425,7 +427,7 @@ async function showMatches(ctx: MyContext, userId: number) {
 
 async function showStats(ctx: MyContext, userId: number) {
   const lang = await getLang(ctx);
-  await ctx.sendChatAction("typing");
+  await ctx.api.sendChatAction(ctx.chat!.id, "typing").catch(() => {});
   const ex = await extendedUserStats(userId);
   const cfg = await getBotConfig();
   const footer = formatNowFooter(lang);
@@ -451,7 +453,7 @@ async function showStats(ctx: MyContext, userId: number) {
 
 async function showLikers(ctx: MyContext, userId: number) {
   const lang = await getLang(ctx);
-  await ctx.sendChatAction("typing");
+  await ctx.api.sendChatAction(ctx.chat!.id, "typing").catch(() => {});
   const ids = await listLikersNotMatched(userId);
   if (ids.length === 0) {
     await ctx.reply(t(lang, "likers.none"));
@@ -1228,7 +1230,9 @@ export async function createBot() {
       return;
 
     if (s.state === "face_verify_wait") {
-      await ctx.reply(t(lang, "face.askPhoto"));
+      await ctx.reply(t(lang, "face.askPhoto"), {
+        reply_markup: new InlineKeyboard().text(lang === "fa" ? "انصراف ❌" : "Cancel ❌", "face:cancel"),
+      });
       return;
     }
 
@@ -1405,9 +1409,16 @@ export async function createBot() {
     const fileId = best.file_id;
 
     if (s.state === "face_verify_wait") {
-      await createFaceSubmission(u.id, fileId);
+      const subId = await createFaceSubmission(u.id, fileId);
       await resetSession(u.id);
       await ctx.reply(t(lang, "face.submitted"));
+      for (const adminTgId of config.adminTelegramIdSet) {
+        const caption = `Face verification #${subId}\nUser DB id: ${u.id} | tg: ${ctx.from!.id}${ctx.from!.username ? " @" + ctx.from!.username : ""}`;
+        const kb = new InlineKeyboard()
+          .text("Approve ✅", `adm:fap:${subId}`)
+          .text("Reject ❌", `adm:far:${subId}`);
+        await ctx.api.sendPhoto(adminTgId, fileId, { caption, reply_markup: kb }).catch(() => {});
+      }
       return;
     }
 
@@ -1543,6 +1554,16 @@ export async function createBot() {
       await markReferralBonusPaid(u.id);
     }
     await ctx.reply(t(lang, "profile.saved"));
+    await sendMainMenuReply(ctx);
+  });
+
+  bot.callbackQuery("face:cancel", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    await resetSession(u.id);
+    await ctx.answerCallbackQuery();
+    const lang = await getLang(ctx);
+    await ctx.reply(lang === "fa" ? "احراز چهره لغو شد." : "Face verification cancelled.");
     await sendMainMenuReply(ctx);
   });
 

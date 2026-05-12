@@ -691,15 +691,16 @@ export async function getPendingFaceSubmissionUserId(submissionId: number): Prom
   return res.rows[0] ? Number(res.rows[0].user_id) : null;
 }
 
-export async function createFaceSubmission(userId: number, photoFileId: string) {
+export async function createFaceSubmission(userId: number, photoFileId: string): Promise<number> {
   await query(
     `UPDATE users SET face_verification_status = 'pending' WHERE id = $1 AND face_verification_status <> 'approved'`,
     [userId]
   );
-  await query(
-    `INSERT INTO face_verification_submissions (user_id, photo_file_id, status) VALUES ($1, $2, 'pending')`,
+  const res = await query<{ id: string }>(
+    `INSERT INTO face_verification_submissions (user_id, photo_file_id, status) VALUES ($1, $2, 'pending') RETURNING id::text`,
     [userId, photoFileId]
   );
+  return Number(res.rows[0]!.id);
 }
 
 export async function listPendingFaceSubmissions(limit: number) {
