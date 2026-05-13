@@ -102,7 +102,7 @@ export const BOT_MESSAGE_KEYS = [
 export type BotMessageKey = typeof BOT_MESSAGE_KEYS[number];
 
 export const DEFAULT_BOT_CONFIG: BotConfigDocument = {
-  v: 1,
+  v: 2,
   start: {
     fa: "منو",
     en: "Menu",
@@ -128,7 +128,6 @@ export const DEFAULT_BOT_CONFIG: BotConfigDocument = {
       [
         { action: "likes", fa: "لایک‌ها ❤️", en: "Likes ❤️" },
         { action: "matches", fa: "پیشنهادات 💌", en: "Matches 💌" },
-        { action: "verify_face", fa: "احراز چهره 📸", en: "Verify Face 📸" },
       ],
     ],
   },
@@ -225,8 +224,10 @@ export async function ensureBotConfigSeeded() {
   const res = await query<{ document: unknown }>(`SELECT document FROM bot_config WHERE id = 1`);
   const row = res.rows[0];
   const d = row?.document;
+  const parsed = BotConfigDocumentSchema.safeParse(d);
   const empty = !d || (typeof d === "object" && d !== null && Object.keys(d as object).length === 0);
-  if (empty || !BotConfigDocumentSchema.safeParse(d).success) {
+  const stale = parsed.success && parsed.data.v < DEFAULT_BOT_CONFIG.v;
+  if (empty || !parsed.success || stale) {
     await query(`UPDATE bot_config SET document = $1::jsonb, updated_at = now() WHERE id = 1`, [
       JSON.stringify(DEFAULT_BOT_CONFIG),
     ]);
