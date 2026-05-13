@@ -8,6 +8,7 @@ const HomeActionSchema = z.enum([
   "stats",
   "share",
   "matches",
+  "likes",
   "verify_face",
   "placeholder",
 ]);
@@ -114,17 +115,21 @@ export const DEFAULT_BOT_CONFIG: BotConfigDocument = {
     rows: [
       [
         { action: "profile", fa: "پروفایل من 👤", en: "My Profile 👤" },
-        { action: "explore", fa: "اکسپلور 🎡", en: "Explore 🎡" },
+        { action: "explore", fa: "جستجوی پارتنر 🔍", en: "Find Partner 🔍" },
       ],
       [
-        { action: "matches", fa: "مچ‌ها 💞", en: "Matches 💞" },
-        { action: "settings", fa: "تنظیمات ⚙️", en: "Settings ⚙️" },
+        { action: "placeholder", fa: "Mystery Room 🎭", en: "Mystery Room 🎭" },
+        { action: "placeholder", fa: "آزمون شخصیت 🧪", en: "Personality Test 🧪" },
       ],
       [
-        { action: "stats", fa: "آمار 📊", en: "Stats 📊" },
-        { action: "share", fa: "اشتراک 🔗", en: "Share 🔗" },
+        { action: "settings", fa: "پنل کاربری ⚙️", en: "Settings ⚙️" },
+        { action: "stats", fa: "Level Up 🚀", en: "Level Up 🚀" },
       ],
-      [{ action: "verify_face", fa: "احراز چهره 📸", en: "Face verify 📸" }],
+      [
+        { action: "likes", fa: "لایک‌ها ❤️", en: "Likes ❤️" },
+        { action: "matches", fa: "پیشنهادات 💌", en: "Matches 💌" },
+        { action: "verify_face", fa: "احراز چهره 📸", en: "Verify Face 📸" },
+      ],
     ],
   },
   explorer_main: {

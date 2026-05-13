@@ -46,6 +46,18 @@ export function haversineMeters(
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
+function orientationDiscoverLabel(lang: Language, o: string | null | undefined): string | null {
+  if (!o || o === "skip") return null;
+  const map: Record<string, { fa: string; en: string }> = {
+    straight: { fa: "مستقیم", en: "Straight" },
+    gay: { fa: "همجنس‌گرا", en: "Gay/Lesbian" },
+    bi: { fa: "دوجنس‌گرا", en: "Bisexual" },
+    other: { fa: "سایر", en: "Other" },
+  };
+  if (map[o]) return lang === "fa" ? map[o].fa : map[o].en;
+  return null;
+}
+
 export function formatDiscoverCaption(params: {
   lang: Language;
   target: ProfileRow;
@@ -53,7 +65,10 @@ export function formatDiscoverCaption(params: {
 }): string {
   const { lang, target, viewer } = params;
   const lines: string[] = [];
-  lines.push(`(${target.age}) ${target.display_name}`);
+
+  const nameLine = `${target.display_name} (${target.age})`;
+  lines.push(nameLine);
+
   if (
     viewer.location_lat != null &&
     viewer.location_lon != null &&
@@ -65,11 +80,22 @@ export function formatDiscoverCaption(params: {
       { lat: target.location_lat, lon: target.location_lon }
     );
     const km = (m / 1000).toFixed(1);
-    lines.push(lang === "fa" ? `📍 ${km} کیلومتر | ${target.city}` : `📍 ${km} km | ${target.city}`);
+    lines.push(lang === "fa" ? `📍 ${target.city} · ${km} کیلومتر` : `📍 ${target.city} · ${km} km`);
   } else {
-    lines.push(lang === "fa" ? `📍 ${target.city}` : `📍 ${target.city}`);
+    lines.push(`📍 ${target.city}`);
   }
-  if (target.bio) lines.push(target.bio);
+
+  const orientation = orientationDiscoverLabel(lang, target.preferences?.orientation);
+  if (orientation) {
+    lines.push(lang === "fa" ? `💜 ${orientation}` : `💜 ${orientation}`);
+  }
+
+  if (target.preferences?.personal_traits) {
+    lines.push(`\n${target.preferences.personal_traits}`);
+  } else if (target.bio) {
+    lines.push(`\n${target.bio}`);
+  }
+
   return lines.join("\n");
 }
 

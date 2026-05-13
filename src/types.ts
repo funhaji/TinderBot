@@ -19,10 +19,13 @@ export type ProfileWizardStep =
   | "age"
   | "city"
   | "gender"
+  | "orientation"
   | "looking_for"
   | "seek_genders"
   | "location"
   | "bio"
+  | "personal_traits"
+  | "partner_traits"
   | "interests"
   | "photos";
 
@@ -35,9 +38,12 @@ export type ProfileWizardPayload = {
     age?: number;
     city?: string;
     gender?: string | null;
+    orientation?: string | null;
     lookingFor?: LookingFor;
     seekGenders?: string[];
     bio?: string;
+    personalTraits?: string;
+    partnerTraits?: string;
     location?: { lat: number; lon: number } | null;
     interestKeys?: string[];
     photoFileIds?: string[];

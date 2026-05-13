@@ -16,6 +16,7 @@ import {
   settingsKeyboardFull,
   settingsLangPickKb,
   wizardGenderKeyboard,
+  wizardOrientationKeyboard,
   wizardLookingForKeyboard,
   wizardSeekKeyboard,
 } from "./ui/keyboards.js";
@@ -146,6 +147,37 @@ async function startProfileWizard(ctx: MyContext, userId: number) {
   await ctx.reply(t(lang, "profile.ask.name"));
 }
 
+function genderLabel(lang: Language, g: string | null): string {
+  if (!g) return "—";
+  const map: Record<string, { fa: string; en: string }> = {
+    m: { fa: "\u0645\u0631\u062f", en: "Male" },
+    f: { fa: "\u0632\u0646", en: "Female" },
+    x: { fa: "\u0633\u0627\u06cc\u0631", en: "Other" },
+  };
+  return map[g] ? (lang === "fa" ? map[g].fa : map[g].en) : g;
+}
+
+function orientationLabel(lang: Language, o: string | null | undefined): string {
+  if (!o || o === "skip") return "—";
+  const map: Record<string, { fa: string; en: string }> = {
+    straight: { fa: "\u0645\u0633\u062a\u0642\u06cc\u0645", en: "Straight" },
+    gay: { fa: "\u0647\u0645\u062c\u0646\u0633\u200c\u06af\u0631\u0627", en: "Gay/Lesbian" },
+    bi: { fa: "\u062f\u0648\u062c\u0646\u0633\u200c\u06af\u0631\u0627", en: "Bisexual" },
+    other: { fa: "\u0633\u0627\u06cc\u0631", en: "Other" },
+  };
+  return map[o] ? (lang === "fa" ? map[o].fa : map[o].en) : o;
+}
+
+function lookingForLabel(lang: Language, lf: string | undefined): string {
+  const map: Record<string, { fa: string; en: string }> = {
+    friends: { fa: "\u062f\u0648\u0633\u062a\u06cc", en: "Friends" },
+    dating: { fa: "\u0631\u0627\u0628\u0637\u0647", en: "Dating" },
+    both: { fa: "\u0647\u0631 \u062f\u0648", en: "Both" },
+  };
+  if (lf && map[lf]) return lang === "fa" ? map[lf].fa : map[lf].en;
+  return "—";
+}
+
 async function renderMyProfile(ctx: MyContext, userId: number) {
   const lang = await getLang(ctx);
   const p = await getProfile(userId);
@@ -155,30 +187,46 @@ async function renderMyProfile(ctx: MyContext, userId: number) {
     return;
   }
   const photoId = await getPrimaryPhoto(userId);
-  const interestKeys = await getUserInterestKeys(userId);
-  const interestsAll = await listInterests();
-  const interestLabels = interestKeys
-    .map((k) => interestsAll.find((i) => i.key === k))
-    .filter(Boolean)
-    .map((i: { fa_label: string; en_label: string }) =>
-      lang === "fa" ? i.fa_label : i.en_label
-    );
-
-  const caption = [
-    `(${p.age}) ${p.display_name}`,
-    `${p.city}`,
-    interestLabels.length ? interestLabels.join(" • ") : "",
-    p.bio ? `\n${p.bio}` : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  const kb = new InlineKeyboard()
-    .text(t(lang, "profile.edit"), cb.profile)
-    .row()
-    .text(t(lang, "home.discover"), cb.discover)
-    .text(t(lang, "home.matches"), cb.matches);
-
+  const prefs = p.preferences;
+  const telegramId = ctx.from?.id ?? 0;
+  const d = "─".repeat(9);
+  let caption: string;
+  if (lang === "fa") {
+    caption = [
+      `${d} « \u0641\u06cc\u0644\u062f\u0647\u0627\u06cc \u0627\u0644\u0632\u0627\u0645\u06cc » ${d}`,
+      `• \u0646\u0627\u0645 : ${p.display_name}`,
+      `• \u0633\u0646 : ${p.age}`,
+      `• \u0634\u0647\u0631 : ${p.city}`,
+      `• \u062c\u0646\u0633\u06cc\u062a : ${genderLabel(lang, p.gender)}`,
+      `• \u06af\u0631\u0627\u06cc\u0634 : ${orientationLabel(lang, prefs.orientation)}`,
+      "",
+      `${d} « \u0645\u0634\u062e\u0635\u0627\u062a \u062a\u06a9\u0645\u06cc\u0644\u06cc » ${d}`,
+      `• \u0631\u0627\u0628\u0637\u0647 \u0645\u062f \u0646\u0638\u0631 : ${lookingForLabel(lang, prefs.looking_for)}`,
+      `• \u0648\u06cc\u0698\u06af\u06cc\u200c\u0647\u0627\u06cc \u0641\u0631\u062f\u06cc \u0645\u0646 : ${prefs.personal_traits || "—"}`,
+      `• \u0648\u06cc\u0698\u06af\u06cc\u200c\u0647\u0627\u06cc \u0637\u0631\u0641 \u0645\u0642\u0627\u0628\u0644 : ${prefs.partner_traits || "—"}`,
+      "",
+      "✅ SAFE CONTENT",
+      `#ID:${telegramId}`,
+    ].join("\n");
+  } else {
+    caption = [
+      `${d} « Required Fields » ${d}`,
+      `• Name : ${p.display_name}`,
+      `• Age : ${p.age}`,
+      `• City : ${p.city}`,
+      `• Gender : ${genderLabel(lang, p.gender)}`,
+      `• Orientation : ${orientationLabel(lang, prefs.orientation)}`,
+      "",
+      `${d} « Additional Info » ${d}`,
+      `• Looking for : ${lookingForLabel(lang, prefs.looking_for)}`,
+      `• About me : ${prefs.personal_traits || "—"}`,
+      `• Partner preferences : ${prefs.partner_traits || "—"}`,
+      "",
+      "✅ SAFE CONTENT",
+      `#ID:${telegramId}`,
+    ].join("\n");
+  }
+  const kb = new InlineKeyboard().text(t(lang, "profile.edit"), cb.profile);
   if (photoId) {
     await ctx.replyWithPhoto(photoId, { caption, reply_markup: kb });
   } else {
@@ -218,6 +266,9 @@ async function dispatchHomeAction(
     }
     case "matches":
       await showMatches(ctx, u.id);
+      break;
+    case "likes":
+      await showLikers(ctx, u.id);
       break;
     case "verify_face":
       await setSession(u.id, { state: "face_verify_wait", payload: {} });
@@ -1175,6 +1226,22 @@ export async function createBot() {
     if (s.state !== "profile_wizard" || s.payload.step !== "gender") return;
     const raw = ctx.match?.[1] ?? "skip";
     s.payload.draft.gender = raw === "skip" ? null : raw;
+    s.payload.step = "orientation";
+    await setSession(u.id, { state: "profile_wizard", payload: s.payload });
+    const lang = await getLang(ctx);
+    await ctx.answerCallbackQuery();
+    await ctx.reply(t(lang, "profile.ask.orientation"), {
+      reply_markup: wizardOrientationKeyboard(lang),
+    });
+  });
+
+  bot.callbackQuery(/^wor:(.+)$/, async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    if (s.state !== "profile_wizard" || s.payload.step !== "orientation") return;
+    const raw = ctx.match?.[1] ?? "skip";
+    s.payload.draft.orientation = raw === "skip" ? null : raw;
     s.payload.step = "looking_for";
     await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     const lang = await getLang(ctx);
@@ -1313,6 +1380,24 @@ export async function createBot() {
     }
     if (payload.step === "bio") {
       payload.draft.bio = text === "/skip" ? "" : text.slice(0, 280);
+      payload.step = "personal_traits";
+      await setSession(u.id, { state: "profile_wizard", payload });
+      await ctx.reply(t(lang, "profile.ask.personalTraits"), {
+        reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "pt:skip"),
+      });
+      return;
+    }
+    if (payload.step === "personal_traits") {
+      payload.draft.personalTraits = text.slice(0, 300);
+      payload.step = "partner_traits";
+      await setSession(u.id, { state: "profile_wizard", payload });
+      await ctx.reply(t(lang, "profile.ask.partnerTraits"), {
+        reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "qt:skip"),
+      });
+      return;
+    }
+    if (payload.step === "partner_traits") {
+      payload.draft.partnerTraits = text.slice(0, 300);
       payload.step = "interests";
       await setSession(u.id, { state: "profile_wizard", payload });
       await sendInterestsPicker(ctx, lang, payload.draft.interestKeys ?? []);
@@ -1362,6 +1447,36 @@ export async function createBot() {
     const s = await getSession(u.id);
     if (s.state !== "profile_wizard" || s.payload.step !== "bio") return;
     s.payload.draft.bio = "";
+    s.payload.step = "personal_traits";
+    await setSession(u.id, { state: "profile_wizard", payload: s.payload });
+    const lang = await getLang(ctx);
+    await ctx.answerCallbackQuery();
+    await ctx.reply(t(lang, "profile.ask.personalTraits"), {
+      reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "pt:skip"),
+    });
+  });
+
+  bot.callbackQuery("pt:skip", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    if (s.state !== "profile_wizard" || s.payload.step !== "personal_traits") return;
+    s.payload.draft.personalTraits = "";
+    s.payload.step = "partner_traits";
+    await setSession(u.id, { state: "profile_wizard", payload: s.payload });
+    const lang = await getLang(ctx);
+    await ctx.answerCallbackQuery();
+    await ctx.reply(t(lang, "profile.ask.partnerTraits"), {
+      reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "qt:skip"),
+    });
+  });
+
+  bot.callbackQuery("qt:skip", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    if (s.state !== "profile_wizard" || s.payload.step !== "partner_traits") return;
+    s.payload.draft.partnerTraits = "";
     s.payload.step = "interests";
     await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     const lang = await getLang(ctx);
@@ -1481,6 +1596,9 @@ export async function createBot() {
       seek_genders: d.seekGenders ?? [],
       age_min: 18,
       age_max: 99,
+      orientation: d.orientation ?? null,
+      personal_traits: d.personalTraits ?? "",
+      partner_traits: d.partnerTraits ?? "",
     };
     await upsertProfile(u.id, {
       display_name: d.displayName,
@@ -1543,6 +1661,9 @@ export async function createBot() {
       seek_genders: d.seekGenders ?? [],
       age_min: 18,
       age_max: 99,
+      orientation: d.orientation ?? null,
+      personal_traits: d.personalTraits ?? "",
+      partner_traits: d.partnerTraits ?? "",
     };
     await upsertProfile(u.id, {
       display_name: d.displayName,

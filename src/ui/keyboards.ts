@@ -34,6 +34,7 @@ export const cb = {
   setToggleRd: "set:rd",
 
   wizardGender: (g: string) => `wg:${g}`,
+  wizardOrientation: (o: string) => `wor:${o}`,
   wizardLf: (lf: string) => `wlf:${lf}`,
   wizardSeekToggle: (g: string) => `wsk:${g}`,
   wizardSeekDone: "wsk:done",
@@ -160,6 +161,17 @@ export function wizardGenderKeyboard(lang: Language) {
     .row()
     .text(t(lang, "profile.gender.x"), cb.wizardGender("x"))
     .text(t(lang, "profile.gender.skip"), cb.wizardGender("skip"));
+}
+
+export function wizardOrientationKeyboard(lang: Language) {
+  return new InlineKeyboard()
+    .text(lang === "fa" ? "\u0645\u0633\u062a\u0642\u06cc\u0645" : "Straight", `wor:straight`)
+    .text(lang === "fa" ? "\u0647\u0645\u062c\u0646\u0633\u200c\u06af\u0631\u0627" : "Gay/Lesbian", `wor:gay`)
+    .row()
+    .text(lang === "fa" ? "\u062f\u0648\u062c\u0646\u0633\u200c\u06af\u0631\u0627" : "Bisexual", `wor:bi`)
+    .text(lang === "fa" ? "\u0633\u0627\u06cc\u0631" : "Other", `wor:other`)
+    .row()
+    .text(lang === "fa" ? "\u062a\u0631\u062c\u06cc\u062d \u0645\u06cc\u200c\u062f\u0645 \u0646\u06af\u0645" : "Prefer not to say", `wor:skip`);
 }
 
 export function wizardLookingForKeyboard(lang: Language) {

@@ -24,6 +24,9 @@ export type ProfilePreferences = {
   receive_chat_requests?: boolean;
   receive_direct?: boolean;
   only_verified_can_like_me?: boolean;
+  orientation?: string | null;
+  personal_traits?: string;
+  partner_traits?: string;
 };
 
 export type ProfileRow = {
