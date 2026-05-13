@@ -103,7 +103,7 @@ export const BOT_MESSAGE_KEYS = [
 export type BotMessageKey = typeof BOT_MESSAGE_KEYS[number];
 
 export const DEFAULT_BOT_CONFIG: BotConfigDocument = {
-  v: 3,
+  v: 4,
   start: {
     fa: "منو",
     en: "Menu",
