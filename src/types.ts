@@ -7,6 +7,7 @@ export type SessionState =
   | { state: "profile_wizard"; payload: ProfileWizardPayload }
   | { state: "discover"; payload: DiscoverPayload }
   | { state: "chat"; payload: ChatPayload }
+  | { state: "mystery_wait"; payload: Record<string, unknown> }
   | { state: "admin_broadcast"; payload: Record<string, unknown> }
   | { state: "admin_find"; payload: Record<string, unknown> }
   | { state: "admin_config_wait"; payload: { section: string } }

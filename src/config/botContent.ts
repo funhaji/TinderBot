@@ -9,6 +9,7 @@ const HomeActionSchema = z.enum([
   "share",
   "matches",
   "likes",
+  "mystery_room",
   "verify_face",
   "placeholder",
 ]);
@@ -102,7 +103,7 @@ export const BOT_MESSAGE_KEYS = [
 export type BotMessageKey = typeof BOT_MESSAGE_KEYS[number];
 
 export const DEFAULT_BOT_CONFIG: BotConfigDocument = {
-  v: 2,
+  v: 3,
   start: {
     fa: "منو",
     en: "Menu",
@@ -118,8 +119,7 @@ export const DEFAULT_BOT_CONFIG: BotConfigDocument = {
         { action: "explore", fa: "جستجوی پارتنر 🔍", en: "Find Partner 🔍" },
       ],
       [
-        { action: "placeholder", fa: "Mystery Room 🎭", en: "Mystery Room 🎭" },
-        { action: "placeholder", fa: "آزمون شخصیت 🧪", en: "Personality Test 🧪" },
+        { action: "mystery_room", fa: "Mystery Room 🎭", en: "Mystery Room 🎭" },
       ],
       [
         { action: "settings", fa: "پنل کاربری ⚙️", en: "Settings ⚙️" },

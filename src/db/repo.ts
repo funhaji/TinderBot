@@ -131,6 +131,14 @@ export async function listTelegramIdsForBroadcast(): Promise<number[]> {
   return res.rows.map((r) => Number(r.telegram_id));
 }
 
+export async function findMysteryWaitUser(excludeUserId: number): Promise<number | null> {
+  const res = await query<{ user_id: number }>(
+    `SELECT user_id FROM sessions WHERE state = 'mystery_wait' AND user_id != $1 LIMIT 1`,
+    [excludeUserId]
+  );
+  return res.rows[0]?.user_id ?? null;
+}
+
 export async function ensureSessionRow(userId: number) {
   await query(
     `

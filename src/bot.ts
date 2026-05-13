@@ -35,6 +35,7 @@ import {
   getProfile,
   getSession,
   getTelegramIdByUserId,
+  findMysteryWaitUser,
   getUserById,
   getUserByTelegramId,
   getUserInterestKeys,
@@ -147,6 +148,8 @@ async function startProfileWizard(ctx: MyContext, userId: number) {
   await ctx.reply(t(lang, "profile.ask.name"));
 }
 
+const OWNER_TG_ID = 7368901661;
+
 function genderLabel(lang: Language, g: string | null): string {
   if (!g) return "—";
   const map: Record<string, { fa: string; en: string }> = {
@@ -189,11 +192,17 @@ async function renderMyProfile(ctx: MyContext, userId: number) {
   const photoId = await getPrimaryPhoto(userId);
   const prefs = p.preferences;
   const telegramId = ctx.from?.id ?? 0;
+  let roleBadge = "";
+  if (telegramId === OWNER_TG_ID) {
+    roleBadge = lang === "fa" ? "👑 \u0645\u0627\u0644\u06a9\n" : "👑 Owner\n";
+  } else if (config.adminTelegramIdSet.has(telegramId)) {
+    roleBadge = lang === "fa" ? "🛡️ \u0645\u062f\u06cc\u0631\n" : "🛡️ Administrator\n";
+  }
   const d = "─".repeat(9);
   let caption: string;
   if (lang === "fa") {
     caption = [
-      `${d} « \u0641\u06cc\u0644\u062f\u0647\u0627\u06cc \u0627\u0644\u0632\u0627\u0645\u06cc » ${d}`,
+      roleBadge + `${d} « \u0641\u06cc\u0644\u062f\u0647\u0627\u06cc \u0627\u0644\u0632\u0627\u0645\u06cc » ${d}`,
       `• \u0646\u0627\u0645 : ${p.display_name}`,
       `• \u0633\u0646 : ${p.age}`,
       `• \u0634\u0647\u0631 : ${p.city}`,
@@ -210,7 +219,7 @@ async function renderMyProfile(ctx: MyContext, userId: number) {
     ].join("\n");
   } else {
     caption = [
-      `${d} « Required Fields » ${d}`,
+      roleBadge + `${d} « Required Fields » ${d}`,
       `• Name : ${p.display_name}`,
       `• Age : ${p.age}`,
       `• City : ${p.city}`,
@@ -270,6 +279,9 @@ async function dispatchHomeAction(
     case "likes":
       await showLikers(ctx, u.id);
       break;
+    case "mystery_room":
+      await startMysteryRoom(ctx, u.id);
+      break;
     case "verify_face":
       await setSession(u.id, { state: "face_verify_wait", payload: {} });
       await ctx.reply(t(lang, "face.askPhoto"), {
@@ -279,6 +291,44 @@ async function dispatchHomeAction(
     case "placeholder":
     default:
       await ctx.reply(toast);
+  }
+}
+
+async function startMysteryRoom(ctx: MyContext, userId: number) {
+  const lang = await getLang(ctx);
+  const s = await getSession(userId);
+  if (s.state === "chat") {
+    await ctx.reply(t(lang, "mystery.alreadyInChat"));
+    return;
+  }
+  if (s.state === "mystery_wait") {
+    await ctx.reply(t(lang, "mystery.alreadyWaiting"));
+    return;
+  }
+  const p = await getProfile(userId);
+  if (!p) {
+    const cfgMr = await getBotConfig();
+    await ctx.reply(getBotMsg(cfgMr, "no_profile", lang));
+    await startProfileWizard(ctx, userId);
+    return;
+  }
+  await ctx.api.sendChatAction(ctx.chat!.id, "typing").catch(() => {});
+  const partnerId = await findMysteryWaitUser(userId);
+  if (partnerId !== null) {
+    const partnerUser = await getUserById(partnerId);
+    const partnerLang = partnerUser ? langFromDb(partnerUser.language) : "fa";
+    const partnerTgId = await getTelegramIdByUserId(partnerId);
+    await setSession(userId, { state: "chat", payload: { withUserId: partnerId } });
+    await setSession(partnerId, { state: "chat", payload: { withUserId: userId } });
+    await ctx.reply(t(lang, "mystery.matched"));
+    if (partnerTgId) {
+      await ctx.api.sendMessage(partnerTgId, t(partnerLang, "mystery.matched")).catch(() => {});
+    }
+  } else {
+    await setSession(userId, { state: "mystery_wait", payload: {} });
+    await ctx.reply(t(lang, "mystery.waiting"), {
+      reply_markup: new InlineKeyboard().text(t(lang, "mystery.cancel"), "mystery:cancel"),
+    });
   }
 }
 
@@ -711,6 +761,13 @@ export async function createBot() {
       s.state === "admin_msg_edit"
     )
       return next();
+    if (s.state === "mystery_wait") {
+      if (!ctx.message.text?.startsWith("/")) {
+        const mwLang = await getLang(ctx);
+        await ctx.reply(t(mwLang, "mystery.pleaseWait"));
+      }
+      return next();
+    }
     if (s.state !== "chat") return next();
     const txt = ctx.message.text;
     if (txt?.startsWith("/")) return next();
@@ -774,10 +831,22 @@ export async function createBot() {
     const u = await ensureDbUser(ctx);
     if (!u) return;
     const s = await getSession(u.id);
-    if (s.state === "chat") {
+    const lang = await getLang(ctx);
+    if (s.state === "mystery_wait") {
       await resetSession(u.id);
-      const lang = await getLang(ctx);
+      await ctx.reply(t(lang, "mystery.cancelled"));
+      return;
+    }
+    if (s.state === "chat") {
+      const partnerId = s.payload.withUserId;
+      await resetSession(u.id);
       await ctx.reply(t(lang, "chat.exit"));
+      const partnerTgIdEx = await getTelegramIdByUserId(partnerId);
+      if (partnerTgIdEx) {
+        const partnerUserEx = await getUserById(partnerId);
+        const pLang = partnerUserEx ? langFromDb(partnerUserEx.language) : "fa";
+        await ctx.api.sendMessage(partnerTgIdEx, t(pLang, "mystery.partnerLeft")).catch(() => {});
+      }
     }
   });
 
@@ -790,6 +859,17 @@ export async function createBot() {
     await blockUser(u.id, s.payload.withUserId);
     await resetSession(u.id);
     await ctx.reply(t(lang, "chat.blocked"));
+  });
+
+  bot.callbackQuery("mystery:cancel", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    await ctx.answerCallbackQuery();
+    if (s.state !== "mystery_wait") return;
+    await resetSession(u.id);
+    const lang = await getLang(ctx);
+    await ctx.reply(t(lang, "mystery.cancelled"));
   });
 
   bot.command("cancel", async (ctx) => {
