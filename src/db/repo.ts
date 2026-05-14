@@ -27,6 +27,8 @@ export type ProfilePreferences = {
   orientation?: string | null;
   personal_traits?: string;
   partner_traits?: string;
+  country?: string;
+  prefer_same_country?: boolean;
 };
 
 export type ProfileRow = {
@@ -131,12 +133,116 @@ export async function listTelegramIdsForBroadcast(): Promise<number[]> {
   return res.rows.map((r) => Number(r.telegram_id));
 }
 
-export async function findMysteryWaitUser(excludeUserId: number): Promise<number | null> {
-  const res = await query<{ user_id: number }>(
-    `SELECT user_id FROM sessions WHERE state = 'mystery_wait' AND user_id != $1 LIMIT 1`,
-    [excludeUserId]
+export async function findMysteryWaitUser(params: {
+  excludeUserId: number;
+  myGender: string | null;
+  myAge: number;
+  myCountry: string | null;
+  soughtGender: string | null;
+  ageRangeClose: boolean;
+  wantSameCountry: boolean;
+}): Promise<number | null> {
+  const res = await query<{
+    user_id: number;
+    payload: Record<string, unknown>;
+    gender: string | null;
+    age: number;
+    country: string | null;
+  }>(
+    `SELECT s.user_id, s.payload, p.gender, p.age,
+            LOWER(p.preferences->>'country') AS country
+     FROM sessions s
+     JOIN profiles p ON p.user_id = s.user_id
+     JOIN users u ON u.id = s.user_id
+     WHERE s.state = 'mystery_wait'
+       AND s.user_id != $1
+       AND u.is_banned = false
+       AND s.updated_at > now() - interval '5 minutes'
+     ORDER BY s.updated_at ASC
+     LIMIT 50`,
+    [params.excludeUserId]
   );
-  return res.rows[0]?.user_id ?? null;
+
+  const myCountryNorm = params.myCountry?.toLowerCase().trim() ?? null;
+
+  for (const row of res.rows) {
+    const pl = row.payload as {
+      soughtGender?: string | null;
+      ageRangeClose?: boolean;
+      wantSameCountry?: boolean;
+    };
+    const theirSoughtGender = pl.soughtGender ?? null;
+    const theirAgeRangeClose = pl.ageRangeClose === true;
+    const theirWantSameCountry = pl.wantSameCountry === true;
+
+    const iWantTheirGender =
+      !params.soughtGender ||
+      params.soughtGender === "any" ||
+      row.gender === params.soughtGender;
+
+    const theyWantMyGender =
+      !theirSoughtGender ||
+      theirSoughtGender === "any" ||
+      params.myGender === theirSoughtGender;
+
+    if (!iWantTheirGender || !theyWantMyGender) continue;
+
+    const ageDiff = Math.abs(params.myAge - row.age);
+    if (params.ageRangeClose && ageDiff > 5) continue;
+    if (theirAgeRangeClose && ageDiff > 5) continue;
+
+    const theirCountry = row.country ?? null;
+    if (params.wantSameCountry && (myCountryNorm === null || myCountryNorm !== theirCountry)) continue;
+    if (theirWantSameCountry && (theirCountry === null || myCountryNorm !== theirCountry)) continue;
+
+    return row.user_id;
+  }
+
+  return null;
+}
+
+export async function expireMysteryWaitSessions(): Promise<{ userId: number; telegramId: number; language: string }[]> {
+  const res = await query<{ user_id: number; telegram_id: string; language: string }>(
+    `SELECT s.user_id, u.telegram_id::text, COALESCE(u.language, 'fa') AS language
+     FROM sessions s
+     JOIN users u ON u.id = s.user_id
+     WHERE s.state = 'mystery_wait'
+       AND s.updated_at < now() - interval '5 minutes'`,
+    []
+  );
+  if (res.rows.length === 0) return [];
+  const ids = res.rows.map((r) => r.user_id);
+  await query(
+    `UPDATE sessions SET state='idle', payload='{}'::jsonb, updated_at=now()
+     WHERE user_id = ANY($1::int[])`,
+    [ids]
+  );
+  return res.rows.map((r) => ({ userId: r.user_id, telegramId: Number(r.telegram_id), language: r.language }));
+}
+
+export async function expireMysteryVoteSessions(): Promise<{ userId: number; telegramId: number; language: string; partnerId: number }[]> {
+  const res = await query<{ user_id: number; telegram_id: string; language: string; partner_id: number }>(
+    `SELECT s.user_id, u.telegram_id::text, COALESCE(u.language, 'fa') AS language,
+            (s.payload->>'partnerId')::int AS partner_id
+     FROM sessions s
+     JOIN users u ON u.id = s.user_id
+     WHERE s.state = 'mystery_vote'
+       AND s.updated_at < now() - interval '5 minutes'`,
+    []
+  );
+  if (res.rows.length === 0) return [];
+  const ids = res.rows.map((r) => r.user_id);
+  await query(
+    `UPDATE sessions SET state='idle', payload='{}'::jsonb, updated_at=now()
+     WHERE user_id = ANY($1::int[])`,
+    [ids]
+  );
+  return res.rows.map((r) => ({
+    userId: r.user_id,
+    telegramId: Number(r.telegram_id),
+    language: r.language,
+    partnerId: r.partner_id,
+  }));
 }
 
 export async function ensureSessionRow(userId: number) {
@@ -279,10 +385,7 @@ export async function setUserInterests(userId: number, keys: string[]) {
   await tx(async (q) => {
     await q(`DELETE FROM user_interests WHERE user_id=$1`, [userId]);
     if (keys.length === 0) return;
-    const res = await q<{ id: number; key: string }>(
-      `SELECT id, key FROM interests WHERE key = ANY($1::text[])`,
-      [keys]
-    );
+    const res = await (q as (sql: string, params: unknown[]) => Promise<{ rows: { id: number; key: string }[] }>)(`SELECT id, key FROM interests WHERE key = ANY($1::text[])`, [keys]);
     for (const r of res.rows) {
       await q(`INSERT INTO user_interests (user_id, interest_id) VALUES ($1,$2)`, [userId, r.id]);
     }
@@ -504,7 +607,17 @@ export async function discoveryCandidates(params: {
           COALESCE((me.preferences->>'discovery_radius_m')::double precision, $3::double precision)
         )
       )
+      AND (
+        COALESCE((me.preferences->>'prefer_same_country')::boolean, false) = false
+        OR COALESCE(me.preferences->>'country', '') = ''
+        OR LOWER(COALESCE(p.preferences->>'country', '')) = LOWER(COALESCE(me.preferences->>'country', ''))
+      )
     ORDER BY
+      CASE
+        WHEN COALESCE(me.preferences->>'country', '') != ''
+          AND LOWER(COALESCE(p.preferences->>'country', '')) = LOWER(COALESCE(me.preferences->>'country', ''))
+        THEN 0 ELSE 1
+      END,
       CASE
         WHEN me.location_lat IS NOT NULL AND me.location_lon IS NOT NULL
           AND p.location_lat IS NOT NULL AND p.location_lon IS NOT NULL
@@ -744,10 +857,7 @@ export async function approveFaceSubmission(params: {
   reviewerTelegramId: number;
 }) {
   await tx(async (q) => {
-    const sub = await q<{ user_id: string }>(
-      `SELECT user_id::text FROM face_verification_submissions WHERE id = $1 AND status = 'pending'`,
-      [params.submissionId]
-    );
+    const sub = await (q as (sql: string, params: unknown[]) => Promise<{ rows: { user_id: string }[] }>)(`SELECT user_id::text FROM face_verification_submissions WHERE id = $1 AND status = 'pending'`, [params.submissionId]);
     const uid = sub.rows[0] ? Number(sub.rows[0].user_id) : null;
     if (!uid) return;
     await q(
@@ -764,10 +874,7 @@ export async function rejectFaceSubmission(params: {
   reason: string;
 }) {
   await tx(async (q) => {
-    const sub = await q<{ user_id: string }>(
-      `SELECT user_id::text FROM face_verification_submissions WHERE id = $1 AND status = 'pending'`,
-      [params.submissionId]
-    );
+    const sub = await (q as (sql: string, params: unknown[]) => Promise<{ rows: { user_id: string }[] }>)(`SELECT user_id::text FROM face_verification_submissions WHERE id = $1 AND status = 'pending'`, [params.submissionId]);
     const uid = sub.rows[0] ? Number(sub.rows[0].user_id) : null;
     if (!uid) return;
     await q(

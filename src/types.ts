@@ -8,6 +8,7 @@ export type SessionState =
   | { state: "discover"; payload: DiscoverPayload }
   | { state: "chat"; payload: ChatPayload }
   | { state: "mystery_wait"; payload: Record<string, unknown> }
+  | { state: "mystery_vote"; payload: MysteryVotePayload }
   | { state: "admin_broadcast"; payload: Record<string, unknown> }
   | { state: "admin_find"; payload: Record<string, unknown> }
   | { state: "admin_config_wait"; payload: { section: string } }
@@ -18,6 +19,7 @@ export type SessionState =
 export type ProfileWizardStep =
   | "name"
   | "age"
+  | "country"
   | "city"
   | "gender"
   | "orientation"
@@ -37,6 +39,7 @@ export type ProfileWizardPayload = {
   draft: {
     displayName?: string;
     age?: number;
+    country?: string;
     city?: string;
     gender?: string | null;
     orientation?: string | null;
@@ -60,6 +63,14 @@ export type DiscoverPayload = {
 
 export type ChatPayload = {
   withUserId: number;
+  isMystery?: boolean;
+  startedAt?: number;
+};
+
+export type MysteryVotePayload = {
+  partnerId: number;
+  enteredAt: number;
+  myVote?: "yes" | "no";
 };
 
 export type MyContext = Context;

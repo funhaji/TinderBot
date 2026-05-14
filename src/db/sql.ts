@@ -16,7 +16,6 @@ export async function tx<T>(fn: (q: (text: string, values?: unknown[]) => Promis
   }
 }
 
-export async function query<T = any>(text: string, values?: unknown[]) {
+export async function query<T extends object = any>(text: string, values?: unknown[]) {
   return pool.query<T>(text, values as any);
 }
-

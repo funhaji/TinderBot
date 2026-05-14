@@ -20,6 +20,7 @@ import {
   wizardLookingForKeyboard,
   wizardSeekKeyboard,
 } from "./ui/keyboards.js";
+import type { ProfileRow } from "./db/repo.js";
 import {
   addPermanentHide,
   adjustDiamondBalance,
@@ -36,6 +37,8 @@ import {
   getSession,
   getTelegramIdByUserId,
   findMysteryWaitUser,
+  expireMysteryWaitSessions,
+  expireMysteryVoteSessions,
   getUserById,
   getUserByTelegramId,
   getUserInterestKeys,
@@ -150,6 +153,10 @@ async function startProfileWizard(ctx: MyContext, userId: number) {
 
 const OWNER_TG_ID = 7368901661;
 
+function capitalizeCountry(raw: string): string {
+  return raw.trim().split(/\s+/).map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
+}
+
 function genderLabel(lang: Language, g: string | null): string {
   if (!g) return "—";
   const map: Record<string, { fa: string; en: string }> = {
@@ -181,6 +188,30 @@ function lookingForLabel(lang: Language, lf: string | undefined): string {
   return "—";
 }
 
+function formatMatchProfileCaption(lang: Language, p: ProfileRow): string {
+  const prfs = p.preferences ?? {};
+  const country = prfs.country || "";
+  const lines: string[] = [];
+  if (lang === "fa") {
+    lines.push("\u0670 \u067e\u0631\u0648\u0641\u0627\u06cc\u0644 \u0645\u0686 \u0634\u062f\u0647");
+    lines.push(`\u2022 \u0646\u0627\u0645: ${p.display_name}`);
+    lines.push(`\u2022 \u0633\u0646: ${p.age}`);
+    if (country) lines.push(`\u2022 \u06a9\u0634\u0648\u0631: ${country}`);
+    lines.push(`\u2022 \u0634\u0647\u0631: ${p.city}`);
+    lines.push(`\u2022 \u062c\u0646\u0633\u06cc\u062a: ${genderLabel(lang, p.gender)}`);
+    if (prfs.personal_traits) lines.push(`\u2022 \u062f\u0631\u0628\u0627\u0631\u0647: ${prfs.personal_traits}`);
+  } else {
+    lines.push("\u0670 Matched Profile");
+    lines.push(`\u2022 Name: ${p.display_name}`);
+    lines.push(`\u2022 Age: ${p.age}`);
+    if (country) lines.push(`\u2022 Country: ${country}`);
+    lines.push(`\u2022 City: ${p.city}`);
+    lines.push(`\u2022 Gender: ${genderLabel(lang, p.gender)}`);
+    if (prfs.personal_traits) lines.push(`\u2022 About: ${prfs.personal_traits}`);
+  }
+  return lines.join("\n");
+}
+
 async function renderMyProfile(ctx: MyContext, userId: number) {
   const lang = await getLang(ctx);
   const p = await getProfile(userId);
@@ -205,6 +236,7 @@ async function renderMyProfile(ctx: MyContext, userId: number) {
       roleBadge + `${d} « \u0641\u06cc\u0644\u062f\u0647\u0627\u06cc \u0627\u0644\u0632\u0627\u0645\u06cc » ${d}`,
       `• \u0646\u0627\u0645 : ${p.display_name}`,
       `• \u0633\u0646 : ${p.age}`,
+      `• \u06a9\u0634\u0648\u0631 : ${prefs.country || "—"}`,
       `• \u0634\u0647\u0631 : ${p.city}`,
       `• \u062c\u0646\u0633\u06cc\u062a : ${genderLabel(lang, p.gender)}`,
       `• \u06af\u0631\u0627\u06cc\u0634 : ${orientationLabel(lang, prefs.orientation)}`,
@@ -222,6 +254,7 @@ async function renderMyProfile(ctx: MyContext, userId: number) {
       roleBadge + `${d} « Required Fields » ${d}`,
       `• Name : ${p.display_name}`,
       `• Age : ${p.age}`,
+      `• Country : ${prefs.country || "—"}`,
       `• City : ${p.city}`,
       `• Gender : ${genderLabel(lang, p.gender)}`,
       `• Orientation : ${orientationLabel(lang, prefs.orientation)}`,
@@ -305,6 +338,14 @@ async function startMysteryRoom(ctx: MyContext, userId: number) {
     await ctx.reply(t(lang, "mystery.alreadyWaiting"));
     return;
   }
+  if (s.state === "mystery_vote") {
+    await ctx.reply(t(lang, "mystery.voteAsk"), {
+      reply_markup: new InlineKeyboard()
+        .text(t(lang, "mystery.voteYes"), "mv:yes")
+        .text(t(lang, "mystery.voteNo"), "mv:no"),
+    });
+    return;
+  }
   const p = await getProfile(userId);
   if (!p) {
     const cfgMr = await getBotConfig();
@@ -312,24 +353,19 @@ async function startMysteryRoom(ctx: MyContext, userId: number) {
     await startProfileWizard(ctx, userId);
     return;
   }
-  await ctx.api.sendChatAction(ctx.chat!.id, "typing").catch(() => {});
-  const partnerId = await findMysteryWaitUser(userId);
-  if (partnerId !== null) {
-    const partnerUser = await getUserById(partnerId);
-    const partnerLang = partnerUser ? langFromDb(partnerUser.language) : "fa";
-    const partnerTgId = await getTelegramIdByUserId(partnerId);
-    await setSession(userId, { state: "chat", payload: { withUserId: partnerId } });
-    await setSession(partnerId, { state: "chat", payload: { withUserId: userId } });
-    await ctx.reply(t(lang, "mystery.matched"));
-    if (partnerTgId) {
-      await ctx.api.sendMessage(partnerTgId, t(partnerLang, "mystery.matched")).catch(() => {});
-    }
-  } else {
-    await setSession(userId, { state: "mystery_wait", payload: {} });
-    await ctx.reply(t(lang, "mystery.waiting"), {
-      reply_markup: new InlineKeyboard().text(t(lang, "mystery.cancel"), "mystery:cancel"),
-    });
+  // Check profile completeness for Mystery Room
+  const prfs = p.preferences ?? {};
+  const hasRequired = p.display_name && p.age && p.city && p.gender &&
+    prfs.orientation && prfs.orientation !== "skip";
+  if (!hasRequired) {
+    await ctx.reply(t(lang, "mystery.profileRequired"));
+    return;
   }
+  // Show welcome screen
+  const cfgMr = await getBotConfig();
+  const welcomeText = getBotMsg(cfgMr, "mystery_welcome", lang);
+  const kb = new InlineKeyboard().text(t(lang, "mystery.welcome.start"), "mr:start");
+  await ctx.reply(welcomeText, { reply_markup: kb });
 }
 
 async function discoverStart(ctx: MyContext, userId: number) {
@@ -768,7 +804,47 @@ export async function createBot() {
       }
       return next();
     }
+    if (s.state === "mystery_vote") {
+      if (!ctx.message.text?.startsWith("/")) {
+        const mvLang = await getLang(ctx);
+        await ctx.reply(t(mvLang, "mystery.voteAsk"), {
+          reply_markup: new InlineKeyboard()
+            .text(t(mvLang, "mystery.voteYes"), "mv:yes")
+            .text(t(mvLang, "mystery.voteNo"), "mv:no"),
+        });
+      }
+      return next();
+    }
     if (s.state !== "chat") return next();
+    // Mystery chat: check 15-minute timeout
+    if (s.payload.isMystery && s.payload.startedAt) {
+      const elapsed = Date.now() - s.payload.startedAt;
+      if (elapsed > 15 * 60 * 1000) {
+        const myLang = langFromDb(u.language);
+        const partnerId15 = s.payload.withUserId;
+        const partnerUser15 = await getUserById(partnerId15);
+        const partnerLang15 = partnerUser15 ? langFromDb(partnerUser15.language) : "fa";
+        const partnerTg15 = await getTelegramIdByUserId(partnerId15);
+        await ctx.reply(t(myLang, "mystery.timedOut"));
+        if (partnerTg15) {
+          await ctx.api.sendMessage(partnerTg15, t(partnerLang15, "mystery.timedOut")).catch(() => {});
+        }
+        const nowVote = Date.now();
+        await setSession(u.id, { state: "mystery_vote", payload: { partnerId: partnerId15, enteredAt: nowVote } });
+        await setSession(partnerId15, { state: "mystery_vote", payload: { partnerId: u.id, enteredAt: nowVote } });
+        const voteKbMy = new InlineKeyboard()
+          .text(t(myLang, "mystery.voteYes"), "mv:yes")
+          .text(t(myLang, "mystery.voteNo"), "mv:no");
+        await ctx.reply(t(myLang, "mystery.voteAsk"), { reply_markup: voteKbMy });
+        if (partnerTg15) {
+          const voteKbThem = new InlineKeyboard()
+            .text(t(partnerLang15, "mystery.voteYes"), "mv:yes")
+            .text(t(partnerLang15, "mystery.voteNo"), "mv:no");
+          await ctx.api.sendMessage(partnerTg15, t(partnerLang15, "mystery.voteAsk"), { reply_markup: voteKbThem }).catch(() => {});
+        }
+        return next();
+      }
+    }
     const txt = ctx.message.text;
     if (txt?.startsWith("/")) return next();
     const otherTg = await getTelegramIdByUserId(s.payload.withUserId);
@@ -870,6 +946,163 @@ export async function createBot() {
     await resetSession(u.id);
     const lang = await getLang(ctx);
     await ctx.reply(t(lang, "mystery.cancelled"));
+  });
+
+  // Mystery Room: start button -> show gender preference
+  bot.callbackQuery("mr:start", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    await ctx.answerCallbackQuery();
+    const lang = langFromDb(u.language);
+    const kb = new InlineKeyboard()
+      .text(t(lang, "mystery.prefGender.m"), "mr:g:m")
+      .text(t(lang, "mystery.prefGender.f"), "mr:g:f")
+      .row()
+      .text(t(lang, "mystery.prefGender.x"), "mr:g:x")
+      .text(t(lang, "mystery.prefGender.any"), "mr:g:any");
+    await ctx.reply(t(lang, "mystery.prefGender"), { reply_markup: kb });
+  });
+
+  // Mystery Room: gender selected -> show age preference
+  bot.callbackQuery(/^mr:g:(.+)$/, async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    await ctx.answerCallbackQuery();
+    const lang = langFromDb(u.language);
+    const g = ctx.match![1];
+    const kb = new InlineKeyboard()
+      .text(t(lang, "mystery.prefAge.close"), `mr:age:${g}:close`)
+      .text(t(lang, "mystery.prefAge.any"), `mr:age:${g}:any`);
+    await ctx.reply(t(lang, "mystery.prefAge"), { reply_markup: kb });
+  });
+
+  // Mystery Room: age selected -> show country preference
+  bot.callbackQuery(/^mr:age:(.+):(.+)$/, async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    await ctx.answerCallbackQuery();
+    const lang = langFromDb(u.language);
+    const g = ctx.match![1];
+    const age = ctx.match![2];
+    const kb = new InlineKeyboard()
+      .text(t(lang, "mystery.prefCountry.yes"), `mr:co:${g}:${age}:yes`)
+      .text(t(lang, "mystery.prefCountry.no"), `mr:co:${g}:${age}:no`);
+    await ctx.reply(t(lang, "mystery.prefCountry"), { reply_markup: kb });
+  });
+
+  // Mystery Room: country pref selected -> enter queue or match
+  bot.callbackQuery(/^mr:co:(.+):(.+):(.+)$/, async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    await ctx.answerCallbackQuery();
+    const lang = langFromDb(u.language);
+    const soughtGender = ctx.match![1] === "any" ? null : ctx.match![1];
+    const ageRangeClose = ctx.match![2] === "close";
+    const wantSameCountry = ctx.match![3] === "yes";
+    const s = await getSession(u.id);
+    if (s.state === "chat" || s.state === "mystery_wait" || s.state === "mystery_vote") {
+      await ctx.reply(t(lang, "mystery.alreadyInChat"));
+      return;
+    }
+    const myProfile = await getProfile(u.id);
+    if (!myProfile) {
+      await ctx.reply(t(lang, "mystery.profileRequired"));
+      return;
+    }
+    const prfsMy = myProfile.preferences ?? {};
+    await ctx.api.sendChatAction(ctx.chat!.id, "typing").catch(() => {});
+    const partnerId = await findMysteryWaitUser({
+      excludeUserId: u.id,
+      myGender: myProfile.gender,
+      myAge: myProfile.age,
+      myCountry: prfsMy.country ?? null,
+      soughtGender: soughtGender as string | null,
+      ageRangeClose,
+      wantSameCountry,
+    });
+    if (partnerId !== null) {
+      const partnerUser = await getUserById(partnerId);
+      const partnerLang = partnerUser ? langFromDb(partnerUser.language) : "fa";
+      const partnerTgId = await getTelegramIdByUserId(partnerId);
+      const now = Date.now();
+      await setSession(u.id, { state: "chat", payload: { withUserId: partnerId, isMystery: true, startedAt: now } });
+      await setSession(partnerId, { state: "chat", payload: { withUserId: u.id, isMystery: true, startedAt: now } });
+      await ctx.reply(t(lang, "mystery.matched"));
+      if (partnerTgId) {
+        await ctx.api.sendMessage(partnerTgId, t(partnerLang, "mystery.matched")).catch(() => {});
+      }
+    } else {
+      await setSession(u.id, {
+        state: "mystery_wait",
+        payload: { soughtGender, ageRangeClose, wantSameCountry, enteredAt: Date.now() },
+      });
+      await ctx.reply(t(lang, "mystery.waiting"), {
+        reply_markup: new InlineKeyboard().text(t(lang, "mystery.cancel"), "mystery:cancel"),
+      });
+    }
+  });
+
+  // Mystery Room: vote yes
+  bot.callbackQuery("mv:yes", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    await ctx.answerCallbackQuery();
+    const s = await getSession(u.id);
+    if (s.state !== "mystery_vote") return;
+    const lang = langFromDb(u.language);
+    const vp = s.payload;
+    if (vp.myVote) return;
+    await setSession(u.id, { state: "mystery_vote", payload: { ...vp, myVote: "yes" } });
+    const partnerSess = await getSession(vp.partnerId);
+    if (partnerSess.state === "mystery_vote" && partnerSess.payload.myVote === "yes") {
+      await resetSession(u.id);
+      await resetSession(vp.partnerId);
+      const partnerUser = await getUserById(vp.partnerId);
+      const partnerLang = partnerUser ? langFromDb(partnerUser.language) : "fa";
+      const partnerTgId = await getTelegramIdByUserId(vp.partnerId);
+      await ensureMatch(u.id, vp.partnerId);
+      const myProf = await getProfile(u.id);
+      const theirProf = await getProfile(vp.partnerId);
+      const myPhoto = await getPrimaryPhoto(u.id);
+      const theirPhoto = await getPrimaryPhoto(vp.partnerId);
+      await ctx.reply(t(lang, "mystery.bothYes"));
+      if (theirProf) {
+        const cap = formatMatchProfileCaption(lang, theirProf);
+        if (theirPhoto) await ctx.replyWithPhoto(theirPhoto, { caption: cap }).catch(() => {});
+        else await ctx.reply(cap).catch(() => {});
+      }
+      if (partnerTgId && myProf) {
+        const cap2 = formatMatchProfileCaption(partnerLang, myProf);
+        await ctx.api.sendMessage(partnerTgId, t(partnerLang, "mystery.bothYes")).catch(() => {});
+        if (myPhoto) await ctx.api.sendPhoto(partnerTgId, myPhoto, { caption: cap2 }).catch(() => {});
+        else await ctx.api.sendMessage(partnerTgId, cap2).catch(() => {});
+      }
+    } else {
+      await ctx.reply(t(lang, "mystery.voteWaiting"));
+    }
+  });
+
+  // Mystery Room: vote no
+  bot.callbackQuery("mv:no", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    await ctx.answerCallbackQuery();
+    const s = await getSession(u.id);
+    if (s.state !== "mystery_vote") return;
+    const lang = langFromDb(u.language);
+    const vp = s.payload;
+    await resetSession(u.id);
+    await ctx.reply(t(lang, "mystery.youSaidNo"));
+    const partnerSess = await getSession(vp.partnerId);
+    if (partnerSess.state === "mystery_vote") {
+      await resetSession(vp.partnerId);
+      const partnerUser = await getUserById(vp.partnerId);
+      const partnerLang = partnerUser ? langFromDb(partnerUser.language) : "fa";
+      const partnerTgId = await getTelegramIdByUserId(vp.partnerId);
+      if (partnerTgId) {
+        await ctx.api.sendMessage(partnerTgId, t(partnerLang, "mystery.partnerSaidNo")).catch(() => {});
+      }
+    }
   });
 
   bot.command("cancel", async (ctx) => {
@@ -1132,6 +1365,20 @@ export async function createBot() {
     const p = await getProfile(u.id);
     if (!p) return;
     await mergeProfilePreferences(u.id, { receive_direct: !p.preferences.receive_direct });
+    const lang = await getLang(ctx);
+    const cfg = await getBotConfig();
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageText(labelForLang(cfg.settings.title, lang), {
+      reply_markup: await settingsReplyMarkup(ctx),
+    });
+  });
+
+  bot.callbackQuery(cb.setToggleSc, async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const p = await getProfile(u.id);
+    if (!p) return;
+    await mergeProfilePreferences(u.id, { prefer_same_country: !p.preferences.prefer_same_country });
     const lang = await getLang(ctx);
     const cfg = await getBotConfig();
     await ctx.answerCallbackQuery();
@@ -1444,6 +1691,13 @@ export async function createBot() {
         return;
       }
       payload.draft.age = n;
+      payload.step = "country";
+      await setSession(u.id, { state: "profile_wizard", payload });
+      await ctx.reply(t(lang, "profile.ask.country"));
+      return;
+    }
+    if (payload.step === "country") {
+      payload.draft.country = capitalizeCountry(text);
       payload.step = "city";
       await setSession(u.id, { state: "profile_wizard", payload });
       await ctx.reply(t(lang, "profile.ask.city"));
@@ -1624,7 +1878,7 @@ export async function createBot() {
     const lang = langFromDb(u.language);
     const photos = ctx.msg.photo;
     const best = photos[photos.length - 1];
-    const fileId = best.file_id;
+    const fileId = best!.file_id;
 
     if (s.state === "face_verify_wait") {
       const subId = await createFaceSubmission(u.id, fileId);
@@ -1679,6 +1933,7 @@ export async function createBot() {
       orientation: d.orientation ?? null,
       personal_traits: d.personalTraits ?? "",
       partner_traits: d.partnerTraits ?? "",
+      country: d.country ?? "",
     };
     await upsertProfile(u.id, {
       display_name: d.displayName,
@@ -1744,6 +1999,7 @@ export async function createBot() {
       orientation: d.orientation ?? null,
       personal_traits: d.personalTraits ?? "",
       partner_traits: d.partnerTraits ?? "",
+      country: d.country ?? "",
     };
     await upsertProfile(u.id, {
       display_name: d.displayName,
@@ -1821,6 +2077,32 @@ export async function createBot() {
   setupAdmin(bot);
 
   await setupUx(bot);
+
+  // Periodic cleanup of expired mystery sessions
+  setInterval(async () => {
+    try {
+      const expiredWait = await expireMysteryWaitSessions();
+      for (const ex of expiredWait) {
+        try {
+          const tgId = await getTelegramIdByUserId(ex.userId);
+          if (tgId) {
+            const lang = ex.language as Language;
+            await bot.api.sendMessage(tgId, t(lang, "mystery.queueExpired"));
+          }
+        } catch {}
+      }
+      const expiredVote = await expireMysteryVoteSessions();
+      for (const ev of expiredVote) {
+        try {
+          const tgId = await getTelegramIdByUserId(ev.userId);
+          if (tgId) {
+            const lang = ev.language as Language;
+            await bot.api.sendMessage(tgId, t(lang, "mystery.voteExpired"));
+          }
+        } catch {}
+      }
+    } catch {}
+  }, 5 * 60 * 1000);
 
   return bot;
 }

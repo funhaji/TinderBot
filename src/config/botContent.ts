@@ -85,6 +85,9 @@ export const BotConfigDocumentSchema = z.object({
     face_submitted: LangPairSchema,
     face_approved: LangPairSchema,
     face_rejected: LangPairSchema,
+    mystery_welcome: LangPairSchema.optional(),
+    mystery_chat_started: LangPairSchema.optional(),
+    mystery_queue_expired: LangPairSchema.optional(),
   }).optional(),
 });
 
@@ -99,11 +102,14 @@ export const BOT_MESSAGE_KEYS = [
   "face_submitted",
   "face_approved",
   "face_rejected",
+  "mystery_welcome",
+  "mystery_chat_started",
+  "mystery_queue_expired",
 ] as const;
 export type BotMessageKey = typeof BOT_MESSAGE_KEYS[number];
 
 export const DEFAULT_BOT_CONFIG: BotConfigDocument = {
-  v: 4,
+  v: 5,
   start: {
     fa: "منو",
     en: "Menu",
@@ -189,6 +195,18 @@ export const DEFAULT_BOT_CONFIG: BotConfigDocument = {
     face_submitted: { fa: "درخواست ثبت شد؛ بعد از بررسی اطلاع می‌دهیم.", en: "Submitted; we will notify you after review." },
     face_approved: { fa: "احراز چهره تأیید شد. ✅", en: "Face verification approved. ✅" },
     face_rejected: { fa: "احراز چهره رد شد؛ می‌توانی دوباره تلاش کنی.", en: "Face verification rejected; you can try again." },
+    mystery_welcome: {
+      fa: "🎭 Mystery Room\n\n🔸 مچ با تطبیق متقابل جنسیت و گرایش.\n\n🔸 ورود فقط با تکمیل نام، سن، کشور، شهر، جنسیت و گرایش.\n\n🔸 انتظار تا ۵ دقیقه.\n\n🔸 برای استفاده از این بخش هزینه‌ای نداره!\n\n🔸 بعد از ۱۵ دقیقه چت قطع می‌شود و ۵ دقیقه فرصت داری بله/خیر بزنی؛ هر دو بله → اتصال کامل و ارسال پروفایل.\n\nبرای شروع روی دکمه زیر بزن.",
+      en: "🎭 Mystery Room\n\n🔸 Matched by mutual gender & orientation compatibility.\n\n🔸 Entry requires a complete profile: name, age, country, city, gender & orientation.\n\n🔸 Queue wait up to 5 minutes.\n\n🔸 Completely free!\n\n🔸 After 15 min the chat ends and you have 5 min to vote yes/no — both yes → full connect & profiles shared.\n\nPress the button below to start.",
+    },
+    mystery_chat_started: {
+      fa: "🎭 با یک نفر وصل شدی! بنویس (برای خروج: /exit)",
+      en: "🎭 Connected! Start chatting (to leave: /exit)",
+    },
+    mystery_queue_expired: {
+      fa: "❌ کسی در صف پیدا نشد. دوباره تلاش کن.",
+      en: "❌ No one found in the queue. Try again.",
+    },
   },
 };
 
@@ -240,6 +258,8 @@ export function labelForLang(pair: { fa: string; en: string }, lang: "fa" | "en"
 }
 
 export function getBotMsg(cfg: BotConfigDocument, key: BotMessageKey, lang: "fa" | "en"): string {
-  const pair = cfg.bot_messages?.[key] ?? DEFAULT_BOT_CONFIG.bot_messages[key];
+  const msgStore = cfg.bot_messages ?? DEFAULT_BOT_CONFIG.bot_messages!;
+  const pair = msgStore[key] ?? DEFAULT_BOT_CONFIG.bot_messages![key];
+  if (!pair) return key;
   return labelForLang(pair, lang);
 }

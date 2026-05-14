@@ -32,6 +32,7 @@ export const cb = {
   setToggleNm: "set:nm",
   setToggleRc: "set:rc",
   setToggleRd: "set:rd",
+  setToggleSc: "set:sc",
 
   wizardGender: (g: string) => `wg:${g}`,
   wizardOrientation: (o: string) => `wor:${o}`,
@@ -93,6 +94,11 @@ export function settingsKeyboardFull(
     .text(t(lang, "settings.radius50"), cb.settingsRad(50000))
     .row()
     .text(t(lang, "settings.seekGenders"), cb.settingsSeekPick)
+    .row()
+    .text(
+      `${onOff(prefs.prefer_same_country)} ${t(lang, "settings.sameCountry")}`,
+      cb.setToggleSc
+    )
     .row()
     .text(t(lang, "settings.back"), cb.settingsHome);
   return kb;

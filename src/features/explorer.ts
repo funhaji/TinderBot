@@ -58,6 +58,17 @@ function orientationDiscoverLabel(lang: Language, o: string | null | undefined):
   return null;
 }
 
+function genderDiscoverLabel(lang: Language, g: string | null | undefined): string | null {
+  if (!g) return null;
+  const map: Record<string, { fa: string; en: string }> = {
+    m: { fa: "مرد", en: "Male" },
+    f: { fa: "زن", en: "Female" },
+    x: { fa: "سایر", en: "Other" },
+  };
+  if (map[g]) return lang === "fa" ? map[g].fa : map[g].en;
+  return null;
+}
+
 export function formatDiscoverCaption(params: {
   lang: Language;
   target: ProfileRow;
@@ -66,8 +77,16 @@ export function formatDiscoverCaption(params: {
   const { lang, target, viewer } = params;
   const lines: string[] = [];
 
-  const nameLine = `${target.display_name} (${target.age})`;
+  const genderStr = genderDiscoverLabel(lang, target.gender);
+  const nameLine = genderStr
+    ? `${target.display_name} · ${target.age} · ${genderStr}`
+    : `${target.display_name} (${target.age})`;
   lines.push(nameLine);
+
+  const country = target.preferences?.country;
+  if (country) {
+    lines.push(lang === "fa" ? `🌍 ${country}` : `🌍 ${country}`);
+  }
 
   if (
     viewer.location_lat != null &&

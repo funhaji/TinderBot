@@ -50,6 +50,9 @@ const MSG_LABEL_KEY: Record<BotMessageKey, string> = {
   face_submitted: "admin.msgFaceSubmitted",
   face_approved: "admin.msgFaceApproved",
   face_rejected: "admin.msgFaceRejected",
+  mystery_welcome: "admin.msgMysteryWelcome",
+  mystery_chat_started: "admin.msgMysteryWelcome",
+  mystery_queue_expired: "admin.msgMysteryWelcome",
 };
 
 const adm = {
@@ -229,7 +232,7 @@ export async function tryHandleAdminFollowupMessage(
         await setSession(u.id, { state: "idle", payload: {} });
         return true;
       }
-      const updatedMessages = { ...DEFAULT_BOT_CONFIG.bot_messages, ...cfg.bot_messages, [msgKey]: { fa: faText, en: txt } };
+      const updatedMessages = { ...DEFAULT_BOT_CONFIG.bot_messages, ...cfg.bot_messages, [msgKey]: { fa: faText, en: txt } } as NonNullable<typeof cfg.bot_messages>;
       await setBotConfigDocument({ ...cfg, bot_messages: updatedMessages });
       invalidateBotConfigCache();
       await setSession(u.id, { state: "idle", payload: {} });
@@ -543,13 +546,13 @@ export function setupAdmin(bot: Bot<MyContext>) {
       return;
     }
     const cfg = await getBotConfig();
-    const current = cfg.bot_messages?.[key as BotMessageKey] ?? DEFAULT_BOT_CONFIG.bot_messages[key as BotMessageKey];
+    const current = cfg.bot_messages?.[key as BotMessageKey] ?? DEFAULT_BOT_CONFIG.bot_messages?.[key as BotMessageKey];
     await ctx.answerCallbackQuery();
     const u = await getUserByTelegramId(ctx.from!.id);
     if (!u) return;
     await setSession(u.id, { state: "admin_msg_edit", payload: { key, step: "fa" } });
     await ctx.reply(
-      tf(lang, "admin.msgCurrent", { fa: current.fa, en: current.en })
+      tf(lang, "admin.msgCurrent", { fa: current?.fa ?? "", en: current?.en ?? "" })
     );
   });
 
