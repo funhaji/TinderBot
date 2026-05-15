@@ -1768,11 +1768,11 @@ export async function createBot() {
       return;
     }
     s.payload.draft.age = n;
-    s.payload.step = "loc_entry";
+    s.payload.step = "gender";
     await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     const lang = await getLang(ctx);
     await ctx.answerCallbackQuery();
-    await ctx.reply(t(lang, "profile.ask.locEntry"), { reply_markup: wizardIranLocationKeyboard(lang) });
+    await ctx.reply(t(lang, "profile.ask.gender"), { reply_markup: wizardGenderKeyboard(lang) });
   });
 
   bot.callbackQuery("wz:loc:tehran", async (ctx) => {
