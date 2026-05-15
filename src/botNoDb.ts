@@ -1,11 +1,11 @@
 import { Bot } from "grammy";
 import { DEFAULT_BOT_CONFIG, labelForLang } from "./config/botContent.js";
 import type { HomeMenuAction } from "./config/botContent.js";
+import { buildCodeHomeReplyKeyboard, matchCodeHomeAction } from "./config/homeMenu.js";
 import { config } from "./config.js";
 import { t } from "./i18n/index.js";
 import { logger } from "./logger.js";
 import type { Language, MyContext } from "./types.js";
-import { buildHomeReplyKeyboard, matchHomeAction } from "./features/replyKeyboard.js";
 import { cb, langKeyboard } from "./ui/keyboards.js";
 
 function langFromTg(ctx: MyContext): Language {
@@ -14,7 +14,7 @@ function langFromTg(ctx: MyContext): Language {
 
 async function sendMenu(ctx: MyContext, lang: Language) {
   await ctx.reply(labelForLang(DEFAULT_BOT_CONFIG.start, lang), {
-    reply_markup: buildHomeReplyKeyboard(DEFAULT_BOT_CONFIG, lang),
+    reply_markup: buildCodeHomeReplyKeyboard(lang),
   });
 }
 
@@ -64,7 +64,7 @@ export async function createBotNoDb() {
 
   bot.on("message:text", async (ctx) => {
     const lang = langFromTg(ctx);
-    const action = matchHomeAction(DEFAULT_BOT_CONFIG, lang, ctx.msg.text);
+    const action = matchCodeHomeAction(lang, ctx.msg.text);
     if (action) {
       await dispatchHomeActionNoDb(ctx, lang, action);
       return;

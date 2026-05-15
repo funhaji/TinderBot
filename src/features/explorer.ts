@@ -4,6 +4,7 @@ import type { Language, MyContext } from "../types.js";
 import type { BotConfigDocument } from "../config/botContent.js";
 import { labelForLang } from "../config/botContent.js";
 import type { ProfileRow } from "../db/repo.js";
+import { genderLabel, orientationLabel } from "../profile/compat.js";
 
 const EX = {
   dislike: "ex:dl",
@@ -46,38 +47,18 @@ export function haversineMeters(
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
-function orientationDiscoverLabel(lang: Language, o: string | null | undefined): string | null {
-  if (!o || o === "skip") return null;
-  const map: Record<string, { fa: string; en: string }> = {
-    straight: { fa: "مستقیم", en: "Straight" },
-    gay: { fa: "همجنس‌گرا", en: "Gay/Lesbian" },
-    bi: { fa: "دوجنس‌گرا", en: "Bisexual" },
-    other: { fa: "سایر", en: "Other" },
-  };
-  if (map[o]) return lang === "fa" ? map[o].fa : map[o].en;
-  return null;
-}
-
-function genderDiscoverLabel(lang: Language, g: string | null | undefined): string | null {
-  if (!g) return null;
-  const map: Record<string, { fa: string; en: string }> = {
-    m: { fa: "مرد", en: "Male" },
-    f: { fa: "زن", en: "Female" },
-    x: { fa: "سایر", en: "Other" },
-  };
-  if (map[g]) return lang === "fa" ? map[g].fa : map[g].en;
-  return null;
-}
-
 export function formatDiscoverCaption(params: {
   lang: Language;
   target: ProfileRow;
   viewer: ProfileRow;
+  badgePrefix?: string;
 }): string {
-  const { lang, target, viewer } = params;
+  const { lang, target, viewer, badgePrefix } = params;
   const lines: string[] = [];
 
-  const genderStr = genderDiscoverLabel(lang, target.gender);
+  if (badgePrefix) lines.push(badgePrefix);
+
+  const genderStr = genderLabel(lang, target.gender);
   const nameLine = genderStr
     ? `${target.display_name} · ${target.age} · ${genderStr}`
     : `${target.display_name} (${target.age})`;
@@ -104,8 +85,8 @@ export function formatDiscoverCaption(params: {
     lines.push(`📍 ${target.city}`);
   }
 
-  const orientation = orientationDiscoverLabel(lang, target.preferences?.orientation);
-  if (orientation) {
+  const orientation = orientationLabel(lang, target.preferences?.orientation);
+  if (orientation && orientation !== "—") {
     lines.push(lang === "fa" ? `💜 ${orientation}` : `💜 ${orientation}`);
   }
 

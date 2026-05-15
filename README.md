@@ -12,11 +12,16 @@ Node.js (TypeScript) Telegram bot using grammY + PostgreSQL.
 1. Copy env:
    - `cp .env.example .env` (Windows: copy manually)
 2. Set `BOT_TOKEN`, `DATABASE_URL`, and optional comma-separated `ADMIN_TELEGRAM_IDS` (numeric Telegram user ids for `/admin`).
+   - Optional: `BOT_OWNER_TELEGRAM_ID` (numeric Telegram id for owner crown badge).
    - Optional proxy (for restricted networks): set `PROXY_URL=127.0.0.1:10808`
 3. Install deps:
    - `npm i`
 4. Start dev:
    - `npm run dev`
+
+## VPS deployment
+
+See **[DEPLOY.md](./DEPLOY.md)** for a step-by-step production setup (PostgreSQL, build, systemd, operations).
 
 ## Notes
 - Migrations run automatically on startup (disable with `SKIP_MIGRATIONS=true`).

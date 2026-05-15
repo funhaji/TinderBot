@@ -36,10 +36,18 @@ const EnvSchema = z.object({
     .string()
     .optional()
     .transform((v) => parseAdminIds(v)),
+  BOT_OWNER_TELEGRAM_ID: z
+    .string()
+    .optional()
+    .transform((v) => {
+      const n = Number((v ?? "").trim());
+      return Number.isFinite(n) && Number.isInteger(n) && n > 0 ? n : 0;
+    }),
 });
 
 export type AppConfig = z.infer<typeof EnvSchema> & {
   adminTelegramIdSet: ReadonlySet<number>;
+  ownerTelegramId: number;
 };
 
 const parsed = EnvSchema.parse(process.env);
@@ -47,4 +55,5 @@ const parsed = EnvSchema.parse(process.env);
 export const config: AppConfig = {
   ...parsed,
   adminTelegramIdSet: new Set(parsed.ADMIN_TELEGRAM_IDS ?? []),
+  ownerTelegramId: parsed.BOT_OWNER_TELEGRAM_ID ?? 0,
 };

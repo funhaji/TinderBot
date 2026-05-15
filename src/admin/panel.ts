@@ -23,6 +23,9 @@ import {
   countMatches,
   countOpenReports,
   countUsers,
+  getAdminDashboardStats,
+  adminGenderDistribution,
+  adminOrientationDistribution,
   getUserByTelegramId,
   getUserById,
   getTelegramIdByUserId,
@@ -30,6 +33,8 @@ import {
   listMessageLogs,
   listOpenReports,
   listPendingFaceSubmissions,
+  listReferralFileRewards,
+  insertReferralFileReward,
   purgeAllMessageLogs,
   rejectFaceSubmission,
   resolveReport,
@@ -85,6 +90,9 @@ const adm = {
   dimd: "adm:dimd",
   editMessages: "adm:msgedit",
   msgPick: (key: string) => `adm:msp:${key}`,
+  sendUser: "adm:su",
+  rewardNew: "adm:rw",
+  rewardList: "adm:rwl",
 };
 
 function adminLang(ctx: MyContext): Language {
@@ -118,7 +126,12 @@ export function adminRootKb(lang: Language) {
     .row()
     .text(t(lang, "admin.editMessages"), adm.editMessages)
     .row()
-    .text(t(lang, "admin.diamonds"), adm.dim);
+    .text(t(lang, "admin.diamonds"), adm.dim)
+    .row()
+    .text(t(lang, "admin.sendUser"), adm.sendUser)
+    .text(t(lang, "admin.referralRewards"), adm.rewardNew)
+    .row()
+    .text(t(lang, "admin.rewardList"), adm.rewardList);
 }
 
 export async function tryHandleAdminFollowupMessage(
@@ -129,6 +142,31 @@ export async function tryHandleAdminFollowupMessage(
 ): Promise<boolean> {
   if (!isAdminTg(ctx.from?.id)) return false;
   const txt = ctx.message?.text?.trim() ?? "";
+
+  if (s.state === "admin_reward_file" && ctx.message?.document) {
+    const pl = s.payload as { minReferrals: number; captionFa: string; captionEn: string };
+    const fid = ctx.message.document.file_id;
+    await insertReferralFileReward({
+      minReferrals: pl.minReferrals,
+      captionFa: pl.captionFa,
+      captionEn: pl.captionEn,
+      fileId: fid,
+    });
+    await setSession(u.id, { state: "idle", payload: {} });
+    await ctx.reply(t(lang, "admin.rewardSaved"));
+    logger.info({ admin: ctx.from?.id, min: pl.minReferrals }, "admin_referral_reward_created");
+    return true;
+  }
+
+  if (s.state === "admin_reward_file" && !ctx.message?.document) {
+    if (txt === "/cancel") {
+      await setSession(u.id, { state: "idle", payload: {} });
+      await ctx.reply(t(lang, "admin.broadcastCancelled"));
+      return true;
+    }
+    await ctx.reply(t(lang, "admin.rewardPromptFile"));
+    return true;
+  }
 
   if (s.state === "admin_config_wait") {
     const section = (s.payload as { section?: string }).section ?? "";
@@ -242,6 +280,72 @@ export async function tryHandleAdminFollowupMessage(
     return true;
   }
 
+  if (s.state === "admin_send_user") {
+    const pl = s.payload as { step?: "await_telegram" | "await_text"; targetTelegram?: number };
+    if (txt === "/cancel") {
+      await setSession(u.id, { state: "idle", payload: {} });
+      await ctx.reply(t(lang, "admin.broadcastCancelled"));
+      return true;
+    }
+    if (!pl.targetTelegram) {
+      const tg = Number(txt);
+      if (!Number.isFinite(tg) || !Number.isInteger(tg)) {
+        await ctx.reply(t(lang, "admin.findInvalid"));
+        return true;
+      }
+      await setSession(u.id, { state: "admin_send_user", payload: { step: "await_text", targetTelegram: tg } });
+      await ctx.reply(t(lang, "admin.sendUserPromptText"));
+      return true;
+    }
+    const targetUser = await getUserByTelegramId(pl.targetTelegram);
+    if (!targetUser) {
+      await ctx.reply(t(lang, "admin.userNotFound"));
+      await setSession(u.id, { state: "idle", payload: {} });
+      return true;
+    }
+    const destTg = await getTelegramIdByUserId(targetUser.id);
+    if (!destTg) {
+      await ctx.reply(t(lang, "admin.sendUserFail"));
+      await setSession(u.id, { state: "idle", payload: {} });
+      return true;
+    }
+    try {
+      await ctx.api.copyMessage(destTg, ctx.chat!.id, ctx.message!.message_id);
+      await ctx.reply(t(lang, "admin.sendUserDone"));
+      logger.info({ admin: ctx.from?.id, toTg: pl.targetTelegram }, "admin_send_user");
+    } catch {
+      await ctx.reply(t(lang, "admin.sendUserFail"));
+    }
+    await setSession(u.id, { state: "idle", payload: {} });
+    return true;
+  }
+
+  if (s.state === "admin_reward_meta") {
+    if (txt === "/cancel") {
+      await setSession(u.id, { state: "idle", payload: {} });
+      await ctx.reply(t(lang, "admin.broadcastCancelled"));
+      return true;
+    }
+    const space = txt.indexOf(" ");
+    if (space < 0) {
+      await ctx.reply(t(lang, "admin.rewardPrompt"));
+      return true;
+    }
+    const minRef = Number(txt.slice(0, space).trim());
+    const rest = txt.slice(space + 1).trim();
+    const cap = rest.split("|").map((x) => x.trim());
+    if (!Number.isFinite(minRef) || cap.length < 2 || !cap[0] || !cap[1]) {
+      await ctx.reply(t(lang, "admin.rewardPrompt"));
+      return true;
+    }
+    await setSession(u.id, {
+      state: "admin_reward_file",
+      payload: { minReferrals: minRef, captionFa: cap[0]!, captionEn: cap[1]! },
+    });
+    await ctx.reply(t(lang, "admin.rewardPromptFile"));
+    return true;
+  }
+
   return false;
 }
 
@@ -269,7 +373,22 @@ export function setupAdmin(bot: Bot<MyContext>) {
     const users = await countUsers();
     const matches = await countMatches();
     const reports = await countOpenReports();
-    await ctx.editMessageText(tf(lang, "admin.statsLine", { users, matches, reports }), {
+    const dash = await getAdminDashboardStats();
+    const gRows = await adminGenderDistribution();
+    const oRows = await adminOrientationDistribution();
+    const genders = gRows.map((r) => `${r.key}: ${r.c}`).join("\n") || "—";
+    const orientations = oRows.map((r) => `${r.key}: ${r.c}`).join("\n") || "—";
+    const body = tf(lang, "admin.statsDetailed", {
+      users,
+      active24: dash.activeUsers24h,
+      matches24: dash.chats24h,
+      mwait: dash.mysteryWaiting,
+      mvote: dash.mysteryVote,
+      genders,
+      orientations,
+    });
+    const short = tf(lang, "admin.statsLine", { users, matches, reports });
+    await ctx.editMessageText(`${short}\n\n${body}`, {
       reply_markup: new InlineKeyboard().text(t(lang, "admin.back"), adm.root),
     });
   });
@@ -614,5 +733,38 @@ export function setupAdmin(bot: Bot<MyContext>) {
       logger.info({ targetId, admin: ctx.from!.id }, "admin_unban");
       await ctx.reply(t(lang, "admin.unban"));
     }
+  });
+
+  bot.callbackQuery(adm.sendUser, async (ctx) => {
+    if (!isAdminTg(ctx.from?.id)) return;
+    const lang = adminLang(ctx);
+    await ctx.answerCallbackQuery();
+    const u = await getUserByTelegramId(ctx.from!.id);
+    if (!u) return;
+    await setSession(u.id, { state: "admin_send_user", payload: { step: "await_telegram" } });
+    await ctx.reply(t(lang, "admin.sendUserPromptTg"));
+  });
+
+  bot.callbackQuery(adm.rewardNew, async (ctx) => {
+    if (!isAdminTg(ctx.from?.id)) return;
+    const lang = adminLang(ctx);
+    await ctx.answerCallbackQuery();
+    const u = await getUserByTelegramId(ctx.from!.id);
+    if (!u) return;
+    await setSession(u.id, { state: "admin_reward_meta", payload: {} });
+    await ctx.reply(t(lang, "admin.rewardPrompt"));
+  });
+
+  bot.callbackQuery(adm.rewardList, async (ctx) => {
+    if (!isAdminTg(ctx.from?.id)) return;
+    const lang = adminLang(ctx);
+    await ctx.answerCallbackQuery();
+    const rows = await listReferralFileRewards();
+    if (rows.length === 0) {
+      await ctx.reply(t(lang, "admin.rewardListEmpty"));
+      return;
+    }
+    const lines = rows.map((r) => tf(lang, "admin.rewardRow", { id: r.id, n: r.min_referrals, fa: r.caption_fa }));
+    await ctx.reply(lines.join("\n"), { reply_markup: new InlineKeyboard().text(t(lang, "admin.back"), adm.root) });
   });
 }

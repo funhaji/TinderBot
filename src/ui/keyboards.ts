@@ -1,4 +1,5 @@
 import { InlineKeyboard } from "grammy";
+import { IRAN_PROVINCES, provinceLabel } from "../config/iranGeo.js";
 import type { BotConfigDocument } from "../config/botContent.js";
 import { labelForLang } from "../config/botContent.js";
 import type { Language } from "../types.js";
@@ -9,6 +10,8 @@ export const cb = {
   setLang: (lang: Language) => `lang:${lang}`,
   home: "home",
   profile: "profile",
+  profileEdit: "profile:edit",
+  wizardCancel: "wiz:cancel",
   discover: "discover",
   settings: "settings",
   likes: "likes",
@@ -100,6 +103,8 @@ export function settingsKeyboardFull(
       cb.setToggleSc
     )
     .row()
+    .text(t(lang, "settings.refresh"), cb.settings)
+    .row()
     .text(t(lang, "settings.back"), cb.settingsHome);
   return kb;
 }
@@ -162,22 +167,61 @@ export function seekGenderKeyboard(lang: Language, selected: Set<string>) {
 
 export function wizardGenderKeyboard(lang: Language) {
   return new InlineKeyboard()
-    .text(t(lang, "profile.gender.m"), cb.wizardGender("m"))
-    .text(t(lang, "profile.gender.f"), cb.wizardGender("f"))
+    .text(t(lang, "profile.gender.boy"), cb.wizardGender("boy"))
+    .text(t(lang, "profile.gender.girl"), cb.wizardGender("girl"))
     .row()
-    .text(t(lang, "profile.gender.x"), cb.wizardGender("x"))
+    .text(t(lang, "profile.gender.trans_boy"), cb.wizardGender("trans_boy"))
+    .text(t(lang, "profile.gender.trans_girl"), cb.wizardGender("trans_girl"))
+    .row()
+    .text(t(lang, "profile.gender.nb_male"), cb.wizardGender("nb_male"))
+    .text(t(lang, "profile.gender.nb_female"), cb.wizardGender("nb_female"))
+    .row()
     .text(t(lang, "profile.gender.skip"), cb.wizardGender("skip"));
 }
 
 export function wizardOrientationKeyboard(lang: Language) {
   return new InlineKeyboard()
-    .text(lang === "fa" ? "\u0645\u0633\u062a\u0642\u06cc\u0645" : "Straight", `wor:straight`)
-    .text(lang === "fa" ? "\u0647\u0645\u062c\u0646\u0633\u200c\u06af\u0631\u0627" : "Gay/Lesbian", `wor:gay`)
+    .text(t(lang, "profile.orientation.straight"), "wor:straight")
+    .text(t(lang, "profile.orientation.gay"), "wor:gay")
     .row()
-    .text(lang === "fa" ? "\u062f\u0648\u062c\u0646\u0633\u200c\u06af\u0631\u0627" : "Bisexual", `wor:bi`)
-    .text(lang === "fa" ? "\u0633\u0627\u06cc\u0631" : "Other", `wor:other`)
+    .text(t(lang, "profile.orientation.lesbian"), "wor:lesbian")
+    .text(t(lang, "profile.orientation.bisexual"), "wor:bisexual")
     .row()
-    .text(lang === "fa" ? "\u062a\u0631\u062c\u06cc\u062d \u0645\u06cc\u200c\u062f\u0645 \u0646\u06af\u0645" : "Prefer not to say", `wor:skip`);
+    .text(t(lang, "profile.orientation.skip"), "wor:skip");
+}
+
+export function wizardAgeCategoryKeyboard(lang: Language) {
+  return new InlineKeyboard()
+    .text(t(lang, "profile.age.cat.u20"), "wac:u20")
+    .text(t(lang, "profile.age.cat.20p"), "wac:20p")
+    .row()
+    .text(t(lang, "profile.age.cat.30p"), "wac:30p");
+}
+
+export function wizardAgePickKeyboard(lang: Language, minAge: number, maxAge: number) {
+  const kb = new InlineKeyboard();
+  let col = 0;
+  for (let a = minAge; a <= maxAge; a++) {
+    kb.text(String(a), `wap:${a}`);
+    col++;
+    if (col % 5 === 0) kb.row();
+  }
+  return kb;
+}
+
+export function wizardIranLocationKeyboard(lang: Language) {
+  const kb = new InlineKeyboard();
+  kb.text(t(lang, "profile.loc.tehran"), "wz:loc:tehran")
+    .text(t(lang, "profile.loc.otherCountries"), "wz:loc:other")
+    .row();
+  let col = 0;
+  for (const p of IRAN_PROVINCES) {
+    if (p.id === "tehran") continue;
+    kb.text(provinceLabel(p.id, lang), `wz:loc:ir:${p.id}`);
+    col++;
+    if (col % 3 === 0) kb.row();
+  }
+  return kb;
 }
 
 export function wizardLookingForKeyboard(lang: Language) {

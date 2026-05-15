@@ -1,4 +1,5 @@
 import type { Language, SessionState } from "../types.js";
+import { orientationMutualOk, mysterySoughtGenderMatches, ageWindowOverlaps, seekGenderMatchesProfile } from "../profile/compat.js";
 import { query, tx } from "./sql.js";
 
 export type DbUser = {
@@ -11,6 +12,9 @@ export type DbUser = {
   face_verification_status: string;
   referral_bonus_paid: boolean;
   referred_by: number | null;
+  referral_code: string | null;
+  badge_verified: boolean;
+  badge_vip: boolean;
 };
 
 export type ProfilePreferences = {
@@ -28,6 +32,7 @@ export type ProfilePreferences = {
   personal_traits?: string;
   partner_traits?: string;
   country?: string;
+  province_key?: string | null;
   prefer_same_country?: boolean;
 };
 
@@ -58,7 +63,8 @@ export async function upsertUser(params: {
           last_seen_at = now(),
           referred_by = COALESCE(users.referred_by, EXCLUDED.referred_by)
     RETURNING id, telegram_id, username, language, is_banned,
-      diamond_balance, face_verification_status, referral_bonus_paid, referred_by
+      diamond_balance, face_verification_status, referral_bonus_paid, referred_by,
+      referral_code, badge_verified, badge_vip
   `,
     [params.telegramId, params.username, params.referredBy ?? null]
   );
@@ -72,7 +78,8 @@ export async function setLanguage(userId: number, lang: Language) {
 export async function getUserByTelegramId(telegramId: number): Promise<DbUser | null> {
   const res = await query<DbUser>(
     `SELECT id, telegram_id, username, language, is_banned,
-            diamond_balance, face_verification_status, referral_bonus_paid, referred_by
+            diamond_balance, face_verification_status, referral_bonus_paid, referred_by,
+            referral_code, badge_verified, badge_vip
      FROM users WHERE telegram_id = $1`,
     [telegramId]
   );
@@ -82,7 +89,8 @@ export async function getUserByTelegramId(telegramId: number): Promise<DbUser | 
 export async function getUserById(userId: number): Promise<DbUser | null> {
   const res = await query<DbUser>(
     `SELECT id, telegram_id, username, language, is_banned,
-            diamond_balance, face_verification_status, referral_bonus_paid, referred_by
+            diamond_balance, face_verification_status, referral_bonus_paid, referred_by,
+            referral_code, badge_verified, badge_vip
      FROM users WHERE id = $1`,
     [userId]
   );
@@ -138,67 +146,84 @@ export async function findMysteryWaitUser(params: {
   myGender: string | null;
   myAge: number;
   myCountry: string | null;
+  myOrientation: string | null;
+  myAgeMin: number;
+  myAgeMax: number;
   soughtGender: string | null;
   ageRangeClose: boolean;
   wantSameCountry: boolean;
 }): Promise<number | null> {
-  const res = await query<{
-    user_id: number;
-    payload: Record<string, unknown>;
-    gender: string | null;
-    age: number;
-    country: string | null;
-  }>(
-    `SELECT s.user_id, s.payload, p.gender, p.age,
-            LOWER(p.preferences->>'country') AS country
-     FROM sessions s
-     JOIN profiles p ON p.user_id = s.user_id
-     JOIN users u ON u.id = s.user_id
-     WHERE s.state = 'mystery_wait'
-       AND s.user_id != $1
-       AND u.is_banned = false
-       AND s.updated_at > now() - interval '5 minutes'
-     ORDER BY s.updated_at ASC
-     LIMIT 50`,
-    [params.excludeUserId]
-  );
+  return tx(async (q) => {
+    const res = await (q as (sql: string, params: unknown[]) => Promise<{ rows: any[] }>)(
+      `
+      SELECT s.user_id, s.payload, p.gender, p.age,
+             LOWER(p.preferences->>'country') AS country,
+             p.preferences AS preferences
+      FROM sessions s
+      JOIN profiles p ON p.user_id = s.user_id
+      JOIN users u ON u.id = s.user_id
+      WHERE s.state = 'mystery_wait'
+        AND s.user_id != $1
+        AND u.is_banned = false
+        AND s.updated_at > now() - interval '5 minutes'
+      ORDER BY s.updated_at ASC
+      FOR UPDATE OF s SKIP LOCKED
+      LIMIT 40
+    `,
+      [params.excludeUserId]
+    );
 
-  const myCountryNorm = params.myCountry?.toLowerCase().trim() ?? null;
+    const myCountryNorm = params.myCountry?.toLowerCase().trim() ?? null;
 
-  for (const row of res.rows) {
-    const pl = row.payload as {
-      soughtGender?: string | null;
-      ageRangeClose?: boolean;
-      wantSameCountry?: boolean;
-    };
-    const theirSoughtGender = pl.soughtGender ?? null;
-    const theirAgeRangeClose = pl.ageRangeClose === true;
-    const theirWantSameCountry = pl.wantSameCountry === true;
+    for (const row of res.rows) {
+      const pl = row.payload as {
+        soughtGender?: string | null;
+        ageRangeClose?: boolean;
+        wantSameCountry?: boolean;
+      };
+      const theirPrefs = (row.preferences ?? {}) as ProfilePreferences;
+      const theirSoughtGender = pl.soughtGender ?? null;
+      const theirAgeRangeClose = pl.ageRangeClose === true;
+      const theirWantSameCountry = pl.wantSameCountry === true;
 
-    const iWantTheirGender =
-      !params.soughtGender ||
-      params.soughtGender === "any" ||
-      row.gender === params.soughtGender;
+      if (!orientationMutualOk(params.myOrientation, params.myGender, theirPrefs.orientation ?? null, row.gender)) {
+        continue;
+      }
 
-    const theyWantMyGender =
-      !theirSoughtGender ||
-      theirSoughtGender === "any" ||
-      params.myGender === theirSoughtGender;
+      if (
+        !ageWindowOverlaps(
+          params.myAge,
+          params.myAgeMin,
+          params.myAgeMax,
+          Number(row.age),
+          theirPrefs.age_min,
+          theirPrefs.age_max
+        )
+      ) {
+        continue;
+      }
 
-    if (!iWantTheirGender || !theyWantMyGender) continue;
+      if (!mysterySoughtGenderMatches(params.soughtGender, row.gender)) continue;
+      if (!mysterySoughtGenderMatches(theirSoughtGender, params.myGender)) continue;
 
-    const ageDiff = Math.abs(params.myAge - row.age);
-    if (params.ageRangeClose && ageDiff > 5) continue;
-    if (theirAgeRangeClose && ageDiff > 5) continue;
+      const ageDiff = Math.abs(params.myAge - Number(row.age));
+      if (params.ageRangeClose && ageDiff > 5) continue;
+      if (theirAgeRangeClose && ageDiff > 5) continue;
 
-    const theirCountry = row.country ?? null;
-    if (params.wantSameCountry && (myCountryNorm === null || myCountryNorm !== theirCountry)) continue;
-    if (theirWantSameCountry && (theirCountry === null || myCountryNorm !== theirCountry)) continue;
+      const theirCountry = row.country ?? null;
+      if (params.wantSameCountry && (myCountryNorm === null || myCountryNorm !== theirCountry)) continue;
+      if (theirWantSameCountry && (theirCountry === null || myCountryNorm !== theirCountry)) continue;
 
-    return row.user_id;
-  }
+      const upd = await (q as (sql: string, params: unknown[]) => Promise<{ rowCount: number }>)(
+        `UPDATE sessions SET state='idle', payload='{}'::jsonb, updated_at=now()
+         WHERE user_id=$1 AND state='mystery_wait'`,
+        [row.user_id]
+      );
+      if (upd.rowCount === 1) return Number(row.user_id);
+    }
 
-  return null;
+    return null;
+  });
 }
 
 export async function expireMysteryWaitSessions(): Promise<{ userId: number; telegramId: number; language: string }[]> {
@@ -379,6 +404,14 @@ export async function getPrimaryPhoto(userId: number): Promise<string | null> {
     [userId]
   );
   return res.rows[0]?.file_id ?? null;
+}
+
+export async function listPhotoFileIds(userId: number): Promise<string[]> {
+  const res = await query<{ file_id: string }>(
+    `SELECT file_id FROM photos WHERE user_id=$1 ORDER BY is_primary DESC, id ASC`,
+    [userId]
+  );
+  return res.rows.map((r) => r.file_id);
 }
 
 export async function setUserInterests(userId: number, keys: string[]) {
@@ -567,23 +600,37 @@ export async function discoveryCandidates(params: {
       AND a.id IS NULL
       AND bl.id IS NULL
       AND h.id IS NULL
-      AND p.age >= COALESCE((me.preferences->>'age_min')::int, 18)
+      AND p.age >= COALESCE((me.preferences->>'age_min')::int, 15)
       AND p.age <= COALESCE((me.preferences->>'age_max')::int, 99)
-      AND me.age >= COALESCE((p.preferences->>'age_min')::int, 18)
+      AND me.age >= COALESCE((p.preferences->>'age_min')::int, 15)
       AND me.age <= COALESCE((p.preferences->>'age_max')::int, 99)
+      AND orientation_mutual_ok(
+        me.preferences->>'orientation',
+        me.gender::text,
+        p.preferences->>'orientation',
+        p.gender::text
+      )
       AND (
         me.preferences->'seek_genders' IS NULL
         OR jsonb_typeof(me.preferences->'seek_genders') <> 'array'
         OR jsonb_array_length(COALESCE(me.preferences->'seek_genders', '[]'::jsonb)) = 0
         OR p.gender IS NULL
-        OR (me.preferences->'seek_genders' @> jsonb_build_array(p.gender))
+        OR (
+          (me.preferences->'seek_genders' @> '["m"]'::jsonb AND profile_phys_sex(p.gender::text) = 'm')
+          OR (me.preferences->'seek_genders' @> '["f"]'::jsonb AND profile_phys_sex(p.gender::text) = 'f')
+          OR (me.preferences->'seek_genders' @> '["x"]'::jsonb AND profile_phys_sex(p.gender::text) IS NULL)
+        )
       )
       AND (
         p.preferences->'seek_genders' IS NULL
         OR jsonb_typeof(p.preferences->'seek_genders') <> 'array'
         OR jsonb_array_length(COALESCE(p.preferences->'seek_genders', '[]'::jsonb)) = 0
         OR me.gender IS NULL
-        OR (p.preferences->'seek_genders' @> jsonb_build_array(me.gender))
+        OR (
+          (p.preferences->'seek_genders' @> '["m"]'::jsonb AND profile_phys_sex(me.gender::text) = 'm')
+          OR (p.preferences->'seek_genders' @> '["f"]'::jsonb AND profile_phys_sex(me.gender::text) = 'f')
+          OR (p.preferences->'seek_genders' @> '["x"]'::jsonb AND profile_phys_sex(me.gender::text) IS NULL)
+        )
       )
       AND (
         COALESCE(me.preferences->>'looking_for', 'both') = 'both'
@@ -647,7 +694,37 @@ export async function listLikersNotMatched(userId: number): Promise<number[]> {
     `
     SELECT s.swiper_id
     FROM swipes s
+    JOIN profiles me ON me.user_id = $1
+    JOIN profiles lik ON lik.user_id = s.swiper_id
     WHERE s.target_id = $1 AND s.direction = 1
+      AND orientation_mutual_ok(
+        lik.preferences->>'orientation',
+        lik.gender::text,
+        me.preferences->>'orientation',
+        me.gender::text
+      )
+      AND (
+        me.preferences->'seek_genders' IS NULL
+        OR jsonb_typeof(me.preferences->'seek_genders') <> 'array'
+        OR jsonb_array_length(COALESCE(me.preferences->'seek_genders', '[]'::jsonb)) = 0
+        OR lik.gender IS NULL
+        OR (
+          (me.preferences->'seek_genders' @> '["m"]'::jsonb AND profile_phys_sex(lik.gender::text) = 'm')
+          OR (me.preferences->'seek_genders' @> '["f"]'::jsonb AND profile_phys_sex(lik.gender::text) = 'f')
+          OR (me.preferences->'seek_genders' @> '["x"]'::jsonb AND profile_phys_sex(lik.gender::text) IS NULL)
+        )
+      )
+      AND (
+        lik.preferences->'seek_genders' IS NULL
+        OR jsonb_typeof(lik.preferences->'seek_genders') <> 'array'
+        OR jsonb_array_length(COALESCE(lik.preferences->'seek_genders', '[]'::jsonb)) = 0
+        OR me.gender IS NULL
+        OR (
+          (lik.preferences->'seek_genders' @> '["m"]'::jsonb AND profile_phys_sex(me.gender::text) = 'm')
+          OR (lik.preferences->'seek_genders' @> '["f"]'::jsonb AND profile_phys_sex(me.gender::text) = 'f')
+          OR (lik.preferences->'seek_genders' @> '["x"]'::jsonb AND profile_phys_sex(me.gender::text) IS NULL)
+        )
+      )
       AND NOT EXISTS (
         SELECT 1 FROM matches m
         WHERE m.unmatched_at IS NULL
@@ -985,4 +1062,181 @@ export async function listDiamondLedgerTail(userId: number, limit: number) {
     [userId, limit]
   );
   return res.rows;
+}
+
+export async function getUserByReferralCode(codeRaw: string): Promise<DbUser | null> {
+  const code = codeRaw.trim();
+  if (!code) return null;
+  const res = await query<DbUser>(
+    `SELECT id, telegram_id, username, language, is_banned,
+            diamond_balance, face_verification_status, referral_bonus_paid, referred_by,
+            referral_code, badge_verified, badge_vip
+     FROM users WHERE lower(referral_code) = lower($1) LIMIT 1`,
+    [code]
+  );
+  return res.rows[0] ?? null;
+}
+
+export async function socialPairAllowed(aId: number, bId: number): Promise<boolean> {
+  const [a, b] = await Promise.all([getProfile(aId), getProfile(bId)]);
+  if (!a || !b) return false;
+  if (
+    !orientationMutualOk(
+      a.preferences?.orientation ?? null,
+      a.gender,
+      b.preferences?.orientation ?? null,
+      b.gender
+    )
+  )
+    return false;
+  if (!seekGenderMatchesProfile(a.preferences?.seek_genders ?? null, b.gender)) return false;
+  if (!seekGenderMatchesProfile(b.preferences?.seek_genders ?? null, a.gender)) return false;
+  return true;
+}
+
+export async function countReferralsWithProfile(referrerUserId: number): Promise<number> {
+  const res = await query<{ c: string }>(
+    `
+    SELECT COUNT(*)::text AS c
+    FROM users u
+    JOIN profiles p ON p.user_id = u.id
+    WHERE u.referred_by = $1
+  `,
+    [referrerUserId]
+  );
+  return Number(res.rows[0]?.c ?? 0);
+}
+
+export async function applyReferralMilestonesForReferrer(referrerUserId: number): Promise<{ vip: boolean; verified: boolean }> {
+  const n = await countReferralsWithProfile(referrerUserId);
+  const vipTh = await getSystemSettingNumber("referral_vip_threshold", 10);
+  const verTh = await getSystemSettingNumber("referral_badge_verify_threshold", 10);
+  const vip = n >= vipTh;
+  const verified = n >= verTh;
+  await query(
+    `UPDATE users SET badge_vip = $2, badge_verified = $3 WHERE id = $1`,
+    [referrerUserId, vip, verified]
+  );
+  return { vip, verified };
+}
+
+export type ReferralFileRewardRow = {
+  id: number;
+  sort_order: number;
+  min_referrals: number;
+  caption_fa: string;
+  caption_en: string;
+  file_id: string;
+  created_at: string;
+};
+
+export async function listReferralFileRewards(): Promise<ReferralFileRewardRow[]> {
+  const res = await query<ReferralFileRewardRow>(
+    `SELECT id, sort_order, min_referrals, caption_fa, caption_en, file_id, created_at::text
+     FROM referral_file_rewards
+     ORDER BY sort_order ASC, min_referrals ASC, id ASC`
+  );
+  return res.rows;
+}
+
+export async function insertReferralFileReward(params: {
+  minReferrals: number;
+  captionFa: string;
+  captionEn: string;
+  fileId: string;
+  sortOrder?: number;
+}): Promise<number> {
+  const res = await query<{ id: string }>(
+    `INSERT INTO referral_file_rewards (sort_order, min_referrals, caption_fa, caption_en, file_id)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id::text`,
+    [params.sortOrder ?? 0, params.minReferrals, params.captionFa, params.captionEn, params.fileId]
+  );
+  return Number(res.rows[0]?.id ?? 0);
+}
+
+export async function deleteReferralFileReward(id: number) {
+  await query(`DELETE FROM referral_file_rewards WHERE id = $1`, [id]);
+}
+
+export async function listUnclaimedReferralFileRewardsForUser(userId: number): Promise<ReferralFileRewardRow[]> {
+  const n = await countReferralsWithProfile(userId);
+  const res = await query<ReferralFileRewardRow>(
+    `
+    SELECT r.id, r.sort_order, r.min_referrals, r.caption_fa, r.caption_en, r.file_id, r.created_at::text
+    FROM referral_file_rewards r
+    WHERE r.min_referrals <= $2
+      AND NOT EXISTS (
+        SELECT 1 FROM user_referral_file_claims c
+        WHERE c.user_id = $1 AND c.reward_id = r.id
+      )
+    ORDER BY r.sort_order ASC, r.min_referrals ASC, r.id ASC
+  `,
+    [userId, n]
+  );
+  return res.rows;
+}
+
+export async function claimReferralFileReward(userId: number, rewardId: number): Promise<boolean> {
+  const n = await countReferralsWithProfile(userId);
+  const ok = await query<{ id: string }>(
+    `SELECT id::text FROM referral_file_rewards WHERE id=$1 AND min_referrals <= $2`,
+    [rewardId, n]
+  );
+  if (!ok.rows[0]) return false;
+  const ins = await query(`INSERT INTO user_referral_file_claims (user_id, reward_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [
+    userId,
+    rewardId,
+  ]);
+  return (ins.rowCount ?? 0) > 0;
+}
+
+export type AdminDashboardStats = {
+  totalUsers: number;
+  activeUsers24h: number;
+  chats24h: number;
+  mysteryWaiting: number;
+  mysteryVote: number;
+};
+
+export async function getAdminDashboardStats(): Promise<AdminDashboardStats> {
+  const u = await query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM users`);
+  const a = await query<{ c: string }>(
+    `SELECT COUNT(*)::text AS c FROM users WHERE last_seen_at > now() - interval '24 hours'`
+  );
+  const m = await query<{ c: string }>(
+    `SELECT COUNT(*)::text AS c FROM matches WHERE created_at > now() - interval '24 hours'`
+  );
+  const mw = await query<{ c: string }>(
+    `SELECT COUNT(*)::text AS c FROM sessions WHERE state = 'mystery_wait'`
+  );
+  const mv = await query<{ c: string }>(
+    `SELECT COUNT(*)::text AS c FROM sessions WHERE state = 'mystery_vote'`
+  );
+  return {
+    totalUsers: Number(u.rows[0]?.c ?? 0),
+    activeUsers24h: Number(a.rows[0]?.c ?? 0),
+    chats24h: Number(m.rows[0]?.c ?? 0),
+    mysteryWaiting: Number(mw.rows[0]?.c ?? 0),
+    mysteryVote: Number(mv.rows[0]?.c ?? 0),
+  };
+}
+
+export type DistributionRow = { key: string; c: number };
+
+export async function adminGenderDistribution(): Promise<DistributionRow[]> {
+  const res = await query<{ key: string | null; c: string }>(
+    `SELECT gender::text AS key, COUNT(*)::text AS c FROM profiles GROUP BY gender ORDER BY COUNT(*) DESC`
+  );
+  return res.rows.map((r) => ({ key: r.key ?? "null", c: Number(r.c ?? 0) }));
+}
+
+export async function adminOrientationDistribution(): Promise<DistributionRow[]> {
+  const res = await query<{ key: string | null; c: string }>(
+    `SELECT COALESCE(preferences->>'orientation','null') AS key, COUNT(*)::text AS c
+     FROM profiles
+     GROUP BY 1
+     ORDER BY COUNT(*) DESC`
+  );
+  return res.rows.map((r) => ({ key: r.key ?? "null", c: Number(r.c ?? 0) }));
 }

@@ -14,13 +14,18 @@ export type SessionState =
   | { state: "admin_config_wait"; payload: { section: string } }
   | { state: "admin_msg_edit"; payload: { key: string; step: "fa" | "en"; fa?: string } }
   | { state: "face_verify_wait"; payload: Record<string, unknown> }
-  | { state: "admin_diamond_wait"; payload: { mode: "grant" | "deduct" } };
+  | { state: "admin_diamond_wait"; payload: { mode: "grant" | "deduct" } }
+  | { state: "admin_send_user"; payload: { step: "await_telegram" | "await_text"; targetTelegram?: number } }
+  | { state: "admin_reward_meta"; payload: Record<string, unknown> }
+  | { state: "admin_reward_file"; payload: { minReferrals: number; captionFa: string; captionEn: string } };
 
 export type ProfileWizardStep =
   | "name"
-  | "age"
-  | "country"
-  | "city"
+  | "age_category"
+  | "age_pick"
+  | "loc_entry"
+  | "loc_foreign_country"
+  | "loc_foreign_city"
   | "gender"
   | "orientation"
   | "looking_for"
@@ -36,11 +41,15 @@ export type LookingFor = "friends" | "dating" | "both";
 
 export type ProfileWizardPayload = {
   step: ProfileWizardStep;
+  /** True when re-saving an existing profile (skip first-time rewards). */
+  editing?: boolean;
   draft: {
     displayName?: string;
     age?: number;
+    ageCategory?: "u20" | "20p" | "30p";
     country?: string;
     city?: string;
+    provinceKey?: string | null;
     gender?: string | null;
     orientation?: string | null;
     lookingFor?: LookingFor;
