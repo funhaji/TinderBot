@@ -76,6 +76,26 @@ import {
   getSystemSettingNumber,
 } from "./db/repo.js";
 
+// ── Hardcoded mystery-room strings (no i18n file edits needed) ──────────────
+const MR: Record<string, { fa: string; en: string }> = {
+  prefGender:        { fa: "🧭 می‌خوای با کی حرف بزنی؟",  en: "🧭 Who do you want to talk to?" },
+  "prefGender.m":    { fa: "👦 پسر",                       en: "👦 Boy"                         },
+  "prefGender.f":    { fa: "👧 دختر",                      en: "👧 Girl"                        },
+  "prefGender.x":    { fa: "⚧ نان‌باینری / دیگر",          en: "⚧ Non-binary / Other"           },
+  "prefGender.any":  { fa: "🎲 هر کسی",                   en: "🎲 Anyone"                      },
+  prefAge:           { fa: "📅 محدوده سنی مورد نظر؟",      en: "📅 Preferred age range?"         },
+  "prefAge.close":   { fa: "🎯 نزدیک به سن من",            en: "🎯 Close to my age"             },
+  "prefAge.any":     { fa: "🔓 هر سنی",                    en: "🔓 Any age"                     },
+  prefCountry:       { fa: "🌍 هم‌وطن باشه؟",              en: "🌍 Same country?"               },
+  "prefCountry.yes": { fa: "✅ بله، هم‌کشوری",             en: "✅ Yes, same country"            },
+  "prefCountry.no":  { fa: "🌐 مهم نیست",                  en: "🌐 Doesn't matter"              },
+};
+
+function mr(lang: Language, key: string): string {
+  return MR[key]?.[lang] ?? key;
+}
+// ────────────────────────────────────────────────────────────────────────────
+
 function langFromDb(v: unknown): Language {
   return v === "fa" ? "fa" : "en";
 }
@@ -1168,20 +1188,22 @@ export async function createBot() {
     await ctx.reply(t(lang, "mystery.cancelled"));
   });
 
+  // ── Mystery Room: step 1 — gender picker (hardcoded strings) ──────────────
   bot.callbackQuery("mr:start", async (ctx) => {
     const u = await ensureDbUser(ctx);
     if (!u) return;
     await ctx.answerCallbackQuery();
     const lang = langFromDb(u.language);
     const kb = new InlineKeyboard()
-      .text(t(lang, "mystery.prefGender.m"), "mr:g:m")
-      .text(t(lang, "mystery.prefGender.f"), "mr:g:f")
+      .text(mr(lang, "prefGender.m"),   "mr:g:m")
+      .text(mr(lang, "prefGender.f"),   "mr:g:f")
       .row()
-      .text(t(lang, "mystery.prefGender.x"), "mr:g:x")
-      .text(t(lang, "mystery.prefGender.any"), "mr:g:any");
-    await ctx.reply(t(lang, "mystery.prefGender"), { reply_markup: kb });
+      .text(mr(lang, "prefGender.x"),   "mr:g:x")
+      .text(mr(lang, "prefGender.any"), "mr:g:any");
+    await ctx.reply(mr(lang, "prefGender"), { reply_markup: kb });
   });
 
+  // ── Mystery Room: step 2 — age range picker ────────────────────────────────
   bot.callbackQuery(/^mr:g:(.+)$/, async (ctx) => {
     const u = await ensureDbUser(ctx);
     if (!u) return;
@@ -1189,24 +1211,26 @@ export async function createBot() {
     const lang = langFromDb(u.language);
     const g = ctx.match![1];
     const kb = new InlineKeyboard()
-      .text(t(lang, "mystery.prefAge.close"), `mr:age:${g}:close`)
-      .text(t(lang, "mystery.prefAge.any"), `mr:age:${g}:any`);
-    await ctx.reply(t(lang, "mystery.prefAge"), { reply_markup: kb });
+      .text(mr(lang, "prefAge.close"), `mr:age:${g}:close`)
+      .text(mr(lang, "prefAge.any"),   `mr:age:${g}:any`);
+    await ctx.reply(mr(lang, "prefAge"), { reply_markup: kb });
   });
 
+  // ── Mystery Room: step 3 — same country picker ────────────────────────────
   bot.callbackQuery(/^mr:age:(.+):(.+)$/, async (ctx) => {
     const u = await ensureDbUser(ctx);
     if (!u) return;
     await ctx.answerCallbackQuery();
     const lang = langFromDb(u.language);
-    const g = ctx.match![1];
+    const g   = ctx.match![1];
     const age = ctx.match![2];
     const kb = new InlineKeyboard()
-      .text(t(lang, "mystery.prefCountry.yes"), `mr:co:${g}:${age}:yes`)
-      .text(t(lang, "mystery.prefCountry.no"), `mr:co:${g}:${age}:no`);
-    await ctx.reply(t(lang, "mystery.prefCountry"), { reply_markup: kb });
+      .text(mr(lang, "prefCountry.yes"), `mr:co:${g}:${age}:yes`)
+      .text(mr(lang, "prefCountry.no"),  `mr:co:${g}:${age}:no`);
+    await ctx.reply(mr(lang, "prefCountry"), { reply_markup: kb });
   });
 
+  // ── Mystery Room: step 4 — matchmaking ────────────────────────────────────
   bot.callbackQuery(/^mr:co:(.+):(.+):(.+)$/, async (ctx) => {
     const u = await ensureDbUser(ctx);
     if (!u) return;
