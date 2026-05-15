@@ -466,6 +466,74 @@ async function dispatchHomeAction(
   }
 }
 
+async function startFeatureSetupWizard(ctx: MyContext, userId: number, feature: "mystery" | "discover") {
+  const p = await getProfile(userId);
+  if (!p) return;
+  const lang = await getLang(ctx);
+  const draft: WizardDraft = {
+    displayName: p.display_name,
+    age: p.age,
+    city: p.city,
+    country: p.preferences?.country ?? "",
+    provinceKey: p.preferences?.province_key ?? null,
+    ageCategory: ageCategoryFromAge(p.age),
+    gender: p.gender,
+    orientation: p.preferences?.orientation ?? null,
+    lookingFor: (p.preferences?.looking_for as LookingFor) ?? "both",
+    seekGenders: p.preferences?.seek_genders ?? [],
+    bio: p.bio ?? "",
+    personalTraits: p.preferences?.personal_traits ?? "",
+    partnerTraits: p.preferences?.partner_traits ?? "",
+    location:
+      p.location_lat != null && p.location_lon != null
+        ? { lat: p.location_lat, lon: p.location_lon }
+        : null,
+    interestKeys: [],
+    photoFileIds: [],
+  };
+  (draft as any).completingFor = feature;
+  if (!p.gender) {
+    await setSession(userId, { state: "profile_wizard", payload: { step: "gender", draft, editing: false } });
+    await ctx.reply(t(lang, "profile.ask.gender"), { reply_markup: wizardGenderKeyboard(lang) });
+    return;
+  }
+  await setSession(userId, { state: "profile_wizard", payload: { step: "orientation", draft, editing: false } });
+  await ctx.reply(t(lang, "profile.ask.orientation"), { reply_markup: wizardOrientationKeyboard(lang) });
+}
+
+async function launchFeature(ctx: MyContext, userId: number, feature: "mystery" | "discover") {
+  if (feature === "mystery") await launchMysteryWelcome(ctx, userId);
+  else await discoverCore(ctx, userId);
+}
+
+async function launchMysteryWelcome(ctx: MyContext, userId: number) {
+  const lang = await getLang(ctx);
+  const cfg = await getBotConfig();
+  const kb = new InlineKeyboard().text(t(lang, "mystery.welcome.start"), "mr:start");
+  await ctx.reply(getBotMsg(cfg, "mystery_welcome", lang), { reply_markup: kb });
+}
+
+async function discoverCore(ctx: MyContext, userId: number) {
+  const lang = await getLang(ctx);
+  await ctx.api.sendChatAction(ctx.chat!.id, "typing").catch(() => {});
+  const p = await getProfile(userId);
+  if (!p) return;
+  const radius = effectiveDiscoveryRadiusMeters(p);
+  const candidates = await discoveryCandidates({
+    meId: userId,
+    lat: p.location_lat,
+    lon: p.location_lon,
+    radiusMeters: radius,
+    limit: config.DISCOVERY_BATCH_SIZE,
+  });
+  if (candidates.length === 0) {
+    await ctx.reply(t(lang, "discover.noCandidates"));
+    return;
+  }
+  await setSession(userId, { state: "discover", payload: { candidates, idx: 0, sub: "main" } });
+  await renderDiscoverCard(ctx, userId);
+}
+
 async function startMysteryRoom(ctx: MyContext, userId: number) {
   const lang = await getLang(ctx);
   const s = await getSession(userId);
@@ -487,56 +555,32 @@ async function startMysteryRoom(ctx: MyContext, userId: number) {
   }
   const p = await getProfile(userId);
   if (!p) {
-    const cfgMr = await getBotConfig();
-    await ctx.reply(getBotMsg(cfgMr, "no_profile", lang));
+    const cfg = await getBotConfig();
+    await ctx.reply(getBotMsg(cfg, "no_profile", lang));
     await startProfileWizard(ctx, userId);
     return;
   }
-  // Check profile completeness for Mystery Room
-  const prfs = p.preferences ?? {};
-  const hasRequired = p.display_name && p.age && p.city && p.gender &&
-    prfs.orientation && prfs.orientation !== "skip";
-  if (!hasRequired) {
-    await ctx.reply(t(lang, "mystery.profileRequired"));
+  if (!p.gender || !p.preferences?.orientation || p.preferences.orientation === "skip") {
+    await startFeatureSetupWizard(ctx, userId, "mystery");
     return;
   }
-  // Show welcome screen
-  const cfgMr = await getBotConfig();
-  const welcomeText = getBotMsg(cfgMr, "mystery_welcome", lang);
-  const kb = new InlineKeyboard().text(t(lang, "mystery.welcome.start"), "mr:start");
-  await ctx.reply(welcomeText, { reply_markup: kb });
+  await launchMysteryWelcome(ctx, userId);
 }
 
 async function discoverStart(ctx: MyContext, userId: number) {
   const lang = await getLang(ctx);
-  await ctx.api.sendChatAction(ctx.chat!.id, "typing").catch(() => {});
   const p = await getProfile(userId);
   if (!p) {
-    const cfgNp = await getBotConfig();
-    await ctx.reply(getBotMsg(cfgNp, "no_profile", lang));
+    const cfg = await getBotConfig();
+    await ctx.reply(getBotMsg(cfg, "no_profile", lang));
     await startProfileWizard(ctx, userId);
     return;
   }
-
-  const radius = effectiveDiscoveryRadiusMeters(p);
-  const candidates = await discoveryCandidates({
-    meId: userId,
-    lat: p.location_lat,
-    lon: p.location_lon,
-    radiusMeters: radius,
-    limit: config.DISCOVERY_BATCH_SIZE,
-  });
-
-  if (candidates.length === 0) {
-    await ctx.reply(t(lang, "discover.noCandidates"));
+  if (!p.gender || !p.preferences?.orientation || p.preferences.orientation === "skip") {
+    await startFeatureSetupWizard(ctx, userId, "discover");
     return;
   }
-
-  await setSession(userId, {
-    state: "discover",
-    payload: { candidates, idx: 0, sub: "main" },
-  });
-  await renderDiscoverCard(ctx, userId);
+  await discoverCore(ctx, userId);
 }
 
 async function renderDiscoverCard(ctx: MyContext, userId: number) {
@@ -608,11 +652,7 @@ async function renderDiscoverCard(ctx: MyContext, userId: number) {
       await ctx.api.editMessageMedia(
         ctx.chat!.id,
         cardMessageId,
-        {
-          type: "photo",
-          media: photoId,
-          caption,
-        },
+        { type: "photo", media: photoId, caption },
         { reply_markup: markup }
       );
     } else {
@@ -996,7 +1036,6 @@ export async function createBot() {
       return next();
     }
     if (s.state !== "chat") return next();
-    // Mystery chat: check 15-minute timeout
     if (s.payload.isMystery && s.payload.startedAt) {
       const elapsed = Date.now() - s.payload.startedAt;
       if (elapsed > 15 * 60 * 1000) {
@@ -1129,7 +1168,6 @@ export async function createBot() {
     await ctx.reply(t(lang, "mystery.cancelled"));
   });
 
-  // Mystery Room: start button -> show gender preference
   bot.callbackQuery("mr:start", async (ctx) => {
     const u = await ensureDbUser(ctx);
     if (!u) return;
@@ -1144,7 +1182,6 @@ export async function createBot() {
     await ctx.reply(t(lang, "mystery.prefGender"), { reply_markup: kb });
   });
 
-  // Mystery Room: gender selected -> show age preference
   bot.callbackQuery(/^mr:g:(.+)$/, async (ctx) => {
     const u = await ensureDbUser(ctx);
     if (!u) return;
@@ -1157,7 +1194,6 @@ export async function createBot() {
     await ctx.reply(t(lang, "mystery.prefAge"), { reply_markup: kb });
   });
 
-  // Mystery Room: age selected -> show country preference
   bot.callbackQuery(/^mr:age:(.+):(.+)$/, async (ctx) => {
     const u = await ensureDbUser(ctx);
     if (!u) return;
@@ -1171,7 +1207,6 @@ export async function createBot() {
     await ctx.reply(t(lang, "mystery.prefCountry"), { reply_markup: kb });
   });
 
-  // Mystery Room: country pref selected -> enter queue or match
   bot.callbackQuery(/^mr:co:(.+):(.+):(.+)$/, async (ctx) => {
     const u = await ensureDbUser(ctx);
     if (!u) return;
@@ -1226,7 +1261,6 @@ export async function createBot() {
     }
   });
 
-  // Mystery Room: vote yes
   bot.callbackQuery("mv:yes", async (ctx) => {
     const u = await ensureDbUser(ctx);
     if (!u) return;
@@ -1266,7 +1300,6 @@ export async function createBot() {
     }
   });
 
-  // Mystery Room: vote no
   bot.callbackQuery("mv:no", async (ctx) => {
     const u = await ensureDbUser(ctx);
     if (!u) return;
@@ -1768,11 +1801,17 @@ export async function createBot() {
       return;
     }
     s.payload.draft.age = n;
-    s.payload.step = "gender";
-    await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     const lang = await getLang(ctx);
     await ctx.answerCallbackQuery();
-    await ctx.reply(t(lang, "profile.ask.gender"), { reply_markup: wizardGenderKeyboard(lang) });
+    if (s.payload.editing) {
+      s.payload.step = "gender";
+      await setSession(u.id, { state: "profile_wizard", payload: s.payload });
+      await ctx.reply(t(lang, "profile.ask.gender"), { reply_markup: wizardGenderKeyboard(lang) });
+    } else {
+      s.payload.step = "loc_entry";
+      await setSession(u.id, { state: "profile_wizard", payload: s.payload });
+      await ctx.reply(t(lang, "profile.ask.locEntry"), { reply_markup: wizardIranLocationKeyboard(lang) });
+    }
   });
 
   bot.callbackQuery("wz:loc:tehran", async (ctx) => {
@@ -1829,13 +1868,32 @@ export async function createBot() {
     if (s.state !== "profile_wizard" || s.payload.step !== "gender") return;
     const raw = ctx.match?.[1] ?? "skip";
     s.payload.draft.gender = raw === "skip" ? null : raw;
+    const completingFor = (s.payload.draft as any).completingFor as string | undefined;
+    const lang = await getLang(ctx);
+    if (completingFor && s.payload.draft.orientation && s.payload.draft.orientation !== "skip") {
+      const p = await getProfile(u.id);
+      if (p) {
+        await upsertProfile(u.id, {
+          display_name: p.display_name,
+          age: p.age,
+          city: p.city,
+          bio: p.bio ?? "",
+          visibility: p.visibility ?? true,
+          gender: s.payload.draft.gender,
+          location_lat: p.location_lat,
+          location_lon: p.location_lon,
+          preferences: p.preferences ?? {},
+        });
+      }
+      await resetSession(u.id);
+      await ctx.answerCallbackQuery();
+      await launchFeature(ctx, u.id, completingFor as "mystery" | "discover");
+      return;
+    }
     s.payload.step = "orientation";
     await setSession(u.id, { state: "profile_wizard", payload: s.payload });
-    const lang = await getLang(ctx);
     await ctx.answerCallbackQuery();
-    await ctx.reply(t(lang, "profile.ask.orientation"), {
-      reply_markup: wizardOrientationKeyboard(lang),
-    });
+    await ctx.reply(t(lang, "profile.ask.orientation"), { reply_markup: wizardOrientationKeyboard(lang) });
   });
 
   bot.callbackQuery(/^wor:(.+)$/, async (ctx) => {
@@ -1847,13 +1905,32 @@ export async function createBot() {
     let o: string | null = raw === "skip" ? null : raw;
     if (o === "bi" || o === "other") o = "bisexual";
     s.payload.draft.orientation = o;
+    const completingFor = (s.payload.draft as any).completingFor as string | undefined;
+    const lang = await getLang(ctx);
+    if (completingFor) {
+      const p = await getProfile(u.id);
+      if (p) {
+        await upsertProfile(u.id, {
+          display_name: p.display_name,
+          age: p.age,
+          city: p.city,
+          bio: p.bio ?? "",
+          visibility: p.visibility ?? true,
+          gender: s.payload.draft.gender ?? p.gender,
+          location_lat: p.location_lat,
+          location_lon: p.location_lon,
+          preferences: { ...(p.preferences ?? {}), orientation: o },
+        });
+      }
+      await resetSession(u.id);
+      await ctx.answerCallbackQuery();
+      await launchFeature(ctx, u.id, completingFor as "mystery" | "discover");
+      return;
+    }
     s.payload.step = "looking_for";
     await setSession(u.id, { state: "profile_wizard", payload: s.payload });
-    const lang = await getLang(ctx);
     await ctx.answerCallbackQuery();
-    await ctx.reply(t(lang, "profile.ask.lookingFor"), {
-      reply_markup: wizardLookingForKeyboard(lang),
-    });
+    await ctx.reply(t(lang, "profile.ask.lookingFor"), { reply_markup: wizardLookingForKeyboard(lang) });
   });
 
   bot.callbackQuery(/^wlf:(friends|dating|both)$/, async (ctx) => {
@@ -2019,12 +2096,16 @@ export async function createBot() {
     if (s.payload.step !== "location") return;
     const loc = ctx.msg.location;
     s.payload.draft.location = { lat: loc.latitude, lon: loc.longitude };
-    s.payload.step = "bio";
-    await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     const lang = await getLang(ctx);
-    await ctx.reply(t(lang, "profile.ask.bio"), {
-      reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "bio:skip"),
-    });
+    if (s.payload.editing) {
+      s.payload.step = "bio";
+      await setSession(u.id, { state: "profile_wizard", payload: s.payload });
+      await ctx.reply(t(lang, "profile.ask.bio"), {
+        reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "bio:skip"),
+      });
+    } else {
+      await finalizeProfileWizard(ctx, u.id, s.payload.draft, false);
+    }
   });
 
   bot.callbackQuery("loc:skip", async (ctx) => {
@@ -2034,13 +2115,17 @@ export async function createBot() {
     if (s.state !== "profile_wizard") return;
     if (s.payload.step !== "location") return;
     s.payload.draft.location = null;
-    s.payload.step = "bio";
-    await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     const lang = await getLang(ctx);
     await ctx.answerCallbackQuery();
-    await ctx.reply(t(lang, "profile.ask.bio"), {
-      reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "bio:skip"),
-    });
+    if (s.payload.editing) {
+      s.payload.step = "bio";
+      await setSession(u.id, { state: "profile_wizard", payload: s.payload });
+      await ctx.reply(t(lang, "profile.ask.bio"), {
+        reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "bio:skip"),
+      });
+    } else {
+      await finalizeProfileWizard(ctx, u.id, s.payload.draft, false);
+    }
   });
 
   bot.callbackQuery("bio:skip", async (ctx) => {
@@ -2279,7 +2364,6 @@ export async function createBot() {
 
   await setupUx(bot);
 
-  // Periodic cleanup of expired mystery sessions
   setInterval(async () => {
     try {
       const expiredWait = await expireMysteryWaitSessions();
