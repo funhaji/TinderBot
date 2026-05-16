@@ -2213,7 +2213,6 @@ export async function createBot() {
 
     if (s.state === "idle" || s.state === "discover") {
       await ensureBotConfigSeeded();
-      const cfg = await getBotConfig();
       const action = matchCodeHomeAction(lang, ctx.msg.text.trim());
       if (action) {
         if (s.state === "discover" && action !== "explore") await resetSession(u.id);
@@ -2230,6 +2229,8 @@ export async function createBot() {
         await startProfileWizard(ctx, u.id);
         return;
       }
+      await sendMainMenuReply(ctx);
+      return;
     }
 
     if (s.state !== "profile_wizard") return;
