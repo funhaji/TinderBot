@@ -1,9 +1,10 @@
-modules = ["nodejs-20", "python-3.11", "postgresql-16"]
+modules = ["nodejs-20", "nix"]
 [nix]
 channel = "stable-25_05"
 
 [agent]
 expertMode = true
+stack = "BEST_EFFORT_FALLBACK"
 
 [workflows]
 runButton = "Project"
@@ -27,3 +28,8 @@ args = "npm run dev"
 
 [workflows.workflow.metadata]
 outputType = "console"
+
+[userenv]
+
+[userenv.shared]
+DISABLE_PROXY = "true"
