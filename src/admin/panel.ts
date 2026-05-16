@@ -115,6 +115,7 @@ const adm = {
   startNotify: "adm:sn",
   startNotifyToggle: "adm:snt",
   startNotifySet: "adm:sns",
+  page: (n: number) => `adm:pg:${n}`,
 };
 
 const CFG_SECTIONS = [
@@ -208,8 +209,54 @@ async function joinLocksText(lang: Language): Promise<string> {
   });
 }
 
-export function adminRootKb(lang: Language) {
-  return new InlineKeyboard()
+function navRow(kb: InlineKeyboard, lang: Language, page: number, total: number): InlineKeyboard {
+  const prev = lang === "fa" ? "‹ قبلی" : "‹ Prev";
+  const next = lang === "fa" ? "بعدی ›" : "Next ›";
+  const hasPrev = page > 1;
+  const hasNext = page < total;
+  if (hasPrev) kb.text(prev, adm.page(page - 1));
+  if (hasNext) kb.text(next, adm.page(page + 1));
+  return kb;
+}
+
+export function adminPageKb(lang: Language, page: number): InlineKeyboard {
+  const TOTAL = 3;
+
+  if (page === 2) {
+    const kb = new InlineKeyboard()
+      .text(t(lang, "admin.botConfig"), adm.cfg)
+      .row()
+      .text(t(lang, "admin.editMessages"), adm.editMessages)
+      .row()
+      .text(t(lang, "admin.referralRewards"), adm.rewardNew)
+      .text(t(lang, "admin.rewardList"), adm.rewardList)
+      .row()
+      .text(t(lang, "admin.referralConfig"), adm.referralCfg)
+      .row()
+      .text(t(lang, "admin.admins"), adm.admins)
+      .text(t(lang, "admin.joinLocks"), adm.joins)
+      .row()
+      .text(t(lang, "admin.startNotify"), adm.startNotify)
+      .row();
+    return navRow(kb, lang, page, TOTAL);
+  }
+
+  if (page === 3) {
+    const kb = new InlineKeyboard()
+      .text(t(lang, "admin.logs"), adm.logs)
+      .text(t(lang, "admin.logToggle"), adm.logToggle)
+      .row()
+      .text(t(lang, "admin.ret24"), adm.ret(24))
+      .text(t(lang, "admin.ret72"), adm.ret(72))
+      .text(t(lang, "admin.ret168"), adm.ret(168))
+      .row()
+      .text(t(lang, "admin.logPurge"), adm.logPurge)
+      .row();
+    return navRow(kb, lang, page, TOTAL);
+  }
+
+  // Page 1 (default)
+  const kb = new InlineKeyboard()
     .text(t(lang, "admin.stats"), adm.stats)
     .row()
     .text(t(lang, "admin.reports"), adm.reports(0))
@@ -217,33 +264,16 @@ export function adminRootKb(lang: Language) {
     .text(t(lang, "admin.broadcast"), adm.broadcast)
     .text(t(lang, "admin.find"), adm.find)
     .row()
-    .text(t(lang, "admin.logs"), adm.logs)
-    .text(t(lang, "admin.logToggle"), adm.logToggle)
-    .row()
-    .text(t(lang, "admin.ret24"), adm.ret(24))
-    .text(t(lang, "admin.ret72"), adm.ret(72))
-    .text(t(lang, "admin.ret168"), adm.ret(168))
-    .row()
-    .text(t(lang, "admin.logPurge"), adm.logPurge)
-    .row()
-    .text(t(lang, "admin.botConfig"), adm.cfg)
-    .row()
-    .text(t(lang, "admin.editMessages"), adm.editMessages)
-    .row()
+    .text(t(lang, "admin.sendUser"), adm.sendUser)
     .text(t(lang, "admin.diamonds"), adm.dim)
     .row()
-    .text(t(lang, "admin.sendUser"), adm.sendUser)
-    .text(t(lang, "admin.referralRewards"), adm.rewardNew)
-    .row()
-    .text(t(lang, "admin.rewardList"), adm.rewardList)
-    .text(t(lang, "admin.referralConfig"), adm.referralCfg)
-    .row()
-    .text(t(lang, "admin.admins"), adm.admins)
-    .text(t(lang, "admin.joinLocks"), adm.joins)
-    .row()
     .text(t(lang, "admin.botToggle"), adm.botToggle)
-    .row()
-    .text(t(lang, "admin.startNotify"), adm.startNotify);
+    .row();
+  return navRow(kb, lang, page, TOTAL);
+}
+
+export function adminRootKb(lang: Language): InlineKeyboard {
+  return adminPageKb(lang, 1);
 }
 
 export async function tryHandleAdminFollowupMessage(
@@ -568,7 +598,15 @@ export function setupAdmin(bot: Bot<MyContext>) {
     if (!isPanelAdmin(ctx.from?.id)) return;
     const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
     await ctx.answerCallbackQuery();
-    await ctx.editMessageText(t(lang, "admin.menu"), { reply_markup: adminRootKb(lang) });
+    await ctx.editMessageText(t(lang, "admin.menu"), { reply_markup: adminPageKb(lang, 1) });
+  });
+
+  bot.callbackQuery(/^adm:pg:(\d+)$/, async (ctx) => {
+    if (!isPanelAdmin(ctx.from?.id)) return;
+    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+    await ctx.answerCallbackQuery();
+    const page = Math.max(1, Math.min(3, Number(ctx.match[1])));
+    await ctx.editMessageText(t(lang, "admin.menu"), { reply_markup: adminPageKb(lang, page) });
   });
 
   bot.callbackQuery(adm.stats, async (ctx) => {
