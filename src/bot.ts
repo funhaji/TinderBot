@@ -1196,7 +1196,8 @@ export async function createBot() {
       s.state === "admin_admin_add" ||
       s.state === "admin_admin_remove" ||
       s.state === "admin_reward_meta" ||
-      s.state === "admin_reward_file"
+      s.state === "admin_reward_file" ||
+      s.state === "admin_start_notify_setup"
     )
       return next();
     if (s.state === "mystery_wait") {
@@ -1549,7 +1550,8 @@ export async function createBot() {
       s.state === "admin_admin_add" ||
       s.state === "admin_admin_remove" ||
       s.state === "admin_reward_meta" ||
-      s.state === "admin_reward_file"
+      s.state === "admin_reward_file" ||
+      s.state === "admin_start_notify_setup"
     ) {
       await resetSession(u.id);
       await ctx.reply(t(lang, "admin.broadcastCancelled"));

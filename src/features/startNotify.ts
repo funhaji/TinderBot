@@ -2,6 +2,7 @@ import type { Api } from "grammy";
 import { getSystemSettingBool, getSystemSettingNumber, getSystemSettingString } from "../db/repo.js";
 import { tf } from "../i18n/index.js";
 import type { Language } from "../types.js";
+import { logger } from "../logger.js";
 
 export function normalizePublicHandle(raw: string): string | null {
   const trimmed = raw.trim();
@@ -50,5 +51,7 @@ export async function notifyStartGroup(
     referred: params.referredByDbId != null ? String(params.referredByDbId) : "—",
   });
 
-  await api.sendMessage(groupRef, text).catch(() => {});
+  await api.sendMessage(groupRef, text).catch((err) => {
+    logger.warn({ err, groupRef }, "start_notify_send_failed");
+  });
 }

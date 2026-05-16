@@ -438,7 +438,12 @@ export async function tryHandleAdminFollowupMessage(
       await ctx.reply(t(lang, "admin.broadcastCancelled"));
       return true;
     }
-    const groupRef = normalizePublicHandle(txt);
+    // Accept either a @username handle or a numeric group ID (e.g. -1001234567890)
+    const numericId = Number(txt.trim());
+    const groupRef =
+      Number.isFinite(numericId) && Number.isInteger(numericId) && numericId !== 0
+        ? String(numericId)
+        : normalizePublicHandle(txt);
     if (!groupRef) {
       await ctx.reply(t(lang, "admin.startNotifySetPrompt"));
       return true;
@@ -1117,12 +1122,13 @@ export function setupAdmin(bot: Bot<MyContext>) {
   bot.callbackQuery(adm.startNotifyToggle, async (ctx) => {
     if (!isPanelAdmin(ctx.from?.id)) return;
     const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+    await ctx.answerCallbackQuery();
     const cur = await isStartNotifyEnabled();
     await setSystemSetting("start_notify_enabled", !cur);
     await ctx.answerCallbackQuery({
       text: !cur ? t(lang, "admin.startNotifyEnabled") : t(lang, "admin.startNotifyDisabled"),
-      show_alert: false,
-    });
+      show_alert: true,
+    }).catch(() => {});
   });
 
   bot.callbackQuery(adm.startNotifySet, async (ctx) => {
