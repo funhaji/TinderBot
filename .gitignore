@@ -3,4 +3,4 @@ dist
 .env
 .env.*
 *.log
-
+dist/
