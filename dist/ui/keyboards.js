@@ -7,6 +7,8 @@ export const cb = {
     home: "home",
     profile: "profile",
     profileEdit: "profile:edit",
+    profileEditBack: "profile:edit:back",
+    profileEditField: (field) => `ped:${field}`,
     wizardCancel: "wiz:cancel",
     discover: "discover",
     settings: "settings",

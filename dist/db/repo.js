@@ -632,7 +632,7 @@ export async function approveFaceSubmission(params) {
         if (!uid)
             return;
         await q(`UPDATE face_verification_submissions SET status = 'approved', reviewed_at = now(), reviewer_telegram_id = $2 WHERE id = $1`, [params.submissionId, params.reviewerTelegramId]);
-        await q(`UPDATE users SET face_verification_status = 'approved' WHERE id = $1`, [uid]);
+        await q(`UPDATE users SET face_verification_status = 'approved', badge_verified = true WHERE id = $1`, [uid]);
     });
 }
 export async function rejectFaceSubmission(params) {

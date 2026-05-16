@@ -1,6 +1,8 @@
 import { InlineKeyboard } from "grammy";
 import { BOT_MESSAGE_KEYS, BotConfigDocumentSchema, DEFAULT_BOT_CONFIG, getBotConfig, getBotMsg, invalidateBotConfigCache, labelForLang, setBotConfigDocument, } from "../config/botContent.js";
-import { config } from "../config.js";
+import { isPanelAdmin } from "../config/access.js";
+import { resolveAdminLang } from "./lang.js";
+import { extractForwardedGroupId, forwardedGroupTitle, getStartNotifyGroupId, isStartNotifyEnabled, } from "../features/startNotify.js";
 import { logger } from "../logger.js";
 import { t, tf } from "../i18n/index.js";
 import { adjustDiamondBalance, approveFaceSubmission, banUser, unbanUser, countMatches, countOpenReports, countUsers, getAdminDashboardStats, adminGenderDistribution, adminOrientationDistribution, getUserByTelegramId, getUserById, getTelegramIdByUserId, getPendingFaceSubmissionUserId, listMessageLogs, listOpenReports, listPendingFaceSubmissions, listReferralFileRewards, insertReferralFileReward, purgeAllMessageLogs, rejectFaceSubmission, resolveReport, resetUserNopes, setProfileVisibility, setSession, getSystemSettingBool, setSystemSetting, } from "../db/repo.js";
@@ -50,13 +52,18 @@ const adm = {
     sendUser: "adm:su",
     rewardNew: "adm:rw",
     rewardList: "adm:rwl",
+    startNotify: "adm:sn",
+    startNotifyToggle: "adm:snt",
+    startNotifySet: "adm:sns",
 };
-function adminLang(ctx) {
-    return ctx.from?.language_code?.startsWith("fa") ? "fa" : "en";
-}
-function isAdminTg(id) {
-    return id != null && config.adminTelegramIdSet.has(id);
-}
+const CFG_SECTIONS = [
+    "start",
+    "home_menu",
+    "explorer_main",
+    "explorer_more",
+    "settings",
+    "stats",
+];
 export function adminRootKb(lang) {
     return new InlineKeyboard()
         .text(t(lang, "admin.stats"), adm.stats)
@@ -85,10 +92,12 @@ export function adminRootKb(lang) {
         .text(t(lang, "admin.sendUser"), adm.sendUser)
         .text(t(lang, "admin.referralRewards"), adm.rewardNew)
         .row()
-        .text(t(lang, "admin.rewardList"), adm.rewardList);
+        .text(t(lang, "admin.rewardList"), adm.rewardList)
+        .row()
+        .text(t(lang, "admin.startNotify"), adm.startNotify);
 }
 export async function tryHandleAdminFollowupMessage(ctx, u, s, lang) {
-    if (!isAdminTg(ctx.from?.id))
+    if (!isPanelAdmin(ctx.from?.id))
         return false;
     const txt = ctx.message?.text?.trim() ?? "";
     if (s.state === "admin_reward_file" && ctx.message?.document) {
@@ -269,6 +278,24 @@ export async function tryHandleAdminFollowupMessage(ctx, u, s, lang) {
         await setSession(u.id, { state: "idle", payload: {} });
         return true;
     }
+    if (s.state === "admin_start_notify_setup") {
+        if (txt === "/cancel") {
+            await setSession(u.id, { state: "idle", payload: {} });
+            await ctx.reply(t(lang, "admin.broadcastCancelled"));
+            return true;
+        }
+        const groupId = await extractForwardedGroupId(ctx);
+        if (groupId == null) {
+            await ctx.reply(t(lang, "admin.startNotifySetPrompt"));
+            return true;
+        }
+        await setSystemSetting("start_notify_group_id", groupId);
+        await setSystemSetting("start_notify_enabled", true);
+        await setSession(u.id, { state: "idle", payload: {} });
+        const title = forwardedGroupTitle(ctx);
+        await ctx.reply(tf(lang, "admin.startNotifySetDone", { title, id: groupId }));
+        return true;
+    }
     if (s.state === "admin_reward_meta") {
         if (txt === "/cancel") {
             await setSession(u.id, { state: "idle", payload: {} });
@@ -298,24 +325,37 @@ export async function tryHandleAdminFollowupMessage(ctx, u, s, lang) {
 }
 export function setupAdmin(bot) {
     bot.command("admin", async (ctx) => {
-        if (!isAdminTg(ctx.from?.id)) {
-            await ctx.reply(t(adminLang(ctx), "admin.denied"));
+        if (!isPanelAdmin(ctx.from?.id)) {
+            await ctx.reply(t(await resolveAdminLang(ctx.from?.id, ctx.from?.language_code), "admin.denied"));
             return;
         }
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         await ctx.reply(t(lang, "admin.menu"), { reply_markup: adminRootKb(lang) });
     });
-    bot.callbackQuery(adm.root, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+    bot.command("setstartnotify", async (ctx) => {
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const chat = ctx.chat;
+        if (!chat || (chat.type !== "group" && chat.type !== "supergroup"))
+            return;
+        const groupChat = chat;
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+        await setSystemSetting("start_notify_group_id", groupChat.id);
+        await setSystemSetting("start_notify_enabled", true);
+        const title = groupChat.title ?? String(groupChat.id);
+        await ctx.reply(tf(lang, "admin.startNotifySetDone", { title, id: groupChat.id }));
+    });
+    bot.callbackQuery(adm.root, async (ctx) => {
+        if (!isPanelAdmin(ctx.from?.id))
+            return;
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         await ctx.answerCallbackQuery();
         await ctx.editMessageText(t(lang, "admin.menu"), { reply_markup: adminRootKb(lang) });
     });
     bot.callbackQuery(adm.stats, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         await ctx.answerCallbackQuery();
         const users = await countUsers();
         const matches = await countMatches();
@@ -340,9 +380,9 @@ export function setupAdmin(bot) {
         });
     });
     bot.callbackQuery(/^adm:rp:(\d+)$/, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         const page = Number(ctx.match?.[1] ?? 0);
         await ctx.answerCallbackQuery();
         const rows = await listOpenReports(REP_PAGE, page * REP_PAGE);
@@ -373,7 +413,7 @@ export function setupAdmin(bot) {
         await ctx.editMessageText(lines.trimEnd(), { reply_markup: kb });
     });
     bot.callbackQuery(/^adm:d:(\d+):(\d+)$/, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
         const reporterId = Number(ctx.match?.[1]);
         const targetId = Number(ctx.match?.[2]);
@@ -384,10 +424,10 @@ export function setupAdmin(bot) {
             adminTelegramId: ctx.from.id,
         });
         logger.info({ reporterId, targetId, admin: ctx.from.id }, "admin_report_dismiss");
-        await ctx.reply(t(adminLang(ctx), "admin.dismiss"));
+        await ctx.reply(t(await resolveAdminLang(ctx.from?.id, ctx.from?.language_code), "admin.dismiss"));
     });
     bot.callbackQuery(/^adm:b:(\d+):(\d+)$/, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
         const reporterId = Number(ctx.match?.[1]);
         const targetId = Number(ctx.match?.[2]);
@@ -399,10 +439,10 @@ export function setupAdmin(bot) {
             adminTelegramId: ctx.from.id,
         });
         logger.warn({ targetId, admin: ctx.from.id }, "admin_ban");
-        await ctx.reply(t(adminLang(ctx), "admin.ban"));
+        await ctx.reply(t(await resolveAdminLang(ctx.from?.id, ctx.from?.language_code), "admin.ban"));
     });
     bot.callbackQuery(/^adm:h:(\d+):(\d+)$/, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
         const reporterId = Number(ctx.match?.[1]);
         const targetId = Number(ctx.match?.[2]);
@@ -414,12 +454,12 @@ export function setupAdmin(bot) {
             adminTelegramId: ctx.from.id,
         });
         logger.info({ targetId, admin: ctx.from.id }, "admin_hide_profile");
-        await ctx.reply(t(adminLang(ctx), "admin.hide"));
+        await ctx.reply(t(await resolveAdminLang(ctx.from?.id, ctx.from?.language_code), "admin.hide"));
     });
     bot.callbackQuery(adm.broadcast, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         await ctx.answerCallbackQuery();
         const u = await getUserByTelegramId(ctx.from.id);
         if (!u)
@@ -428,9 +468,9 @@ export function setupAdmin(bot) {
         await ctx.reply(t(lang, "admin.broadcastPrompt"));
     });
     bot.callbackQuery(adm.find, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         await ctx.answerCallbackQuery();
         const u = await getUserByTelegramId(ctx.from.id);
         if (!u)
@@ -439,9 +479,9 @@ export function setupAdmin(bot) {
         await ctx.reply(t(lang, "admin.findPrompt"));
     });
     bot.callbackQuery(adm.logs, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         await ctx.answerCallbackQuery();
         const rows = await listMessageLogs(15, 0);
         const lines = rows.length
@@ -452,9 +492,9 @@ export function setupAdmin(bot) {
         });
     });
     bot.callbackQuery(adm.logToggle, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         const cur = await getSystemSettingBool("message_logging_enabled", true);
         await setSystemSetting("message_logging_enabled", !cur);
         await ctx.answerCallbackQuery({
@@ -463,17 +503,17 @@ export function setupAdmin(bot) {
         });
     });
     bot.callbackQuery(/^adm:ret:(\d+)$/, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         const h = Number(ctx.match?.[1]);
         await setSystemSetting("message_log_retention_hours", h);
         await ctx.answerCallbackQuery({ text: tf(lang, "admin.retSet", { h }), show_alert: false });
     });
     bot.callbackQuery(adm.logPurge, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         await ctx.answerCallbackQuery();
         await ctx.reply(t(lang, "admin.logPurgeConfirm"), {
             reply_markup: new InlineKeyboard()
@@ -482,16 +522,16 @@ export function setupAdmin(bot) {
         });
     });
     bot.callbackQuery(adm.logPurgeY, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
         await ctx.answerCallbackQuery();
         await purgeAllMessageLogs();
-        await ctx.reply(t(adminLang(ctx), "admin.logPurgeDone"));
+        await ctx.reply(t(await resolveAdminLang(ctx.from?.id, ctx.from?.language_code), "admin.logPurgeDone"));
     });
     bot.callbackQuery(adm.face, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         await ctx.answerCallbackQuery();
         const pending = await listPendingFaceSubmissions(5);
         if (pending.length === 0) {
@@ -501,16 +541,16 @@ export function setupAdmin(bot) {
         const kb = new InlineKeyboard();
         for (const p of pending) {
             kb.text(tf(lang, "admin.faceRow", { id: p.id, uid: p.user_id }), adm.fap(Number(p.id)))
-                .text("R", adm.far(Number(p.id)))
+                .text(t(lang, "admin.faceReject"), adm.far(Number(p.id)))
                 .row();
         }
         kb.text(t(lang, "admin.back"), adm.root);
         await ctx.reply(t(lang, "admin.facePick"), { reply_markup: kb });
     });
     bot.callbackQuery(/^adm:fap:(\d+)$/, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         const id = Number(ctx.match?.[1]);
         await ctx.answerCallbackQuery();
         const uid = await getPendingFaceSubmissionUserId(id);
@@ -528,9 +568,9 @@ export function setupAdmin(bot) {
         await ctx.reply(tf(lang, "admin.faceApproved", { id }));
     });
     bot.callbackQuery(/^adm:far:(\d+)$/, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         const id = Number(ctx.match?.[1]);
         await ctx.answerCallbackQuery();
         const uid = await getPendingFaceSubmissionUserId(id);
@@ -550,37 +590,40 @@ export function setupAdmin(bot) {
         await ctx.reply(tf(lang, "admin.faceRejected", { id }));
     });
     bot.callbackQuery(adm.cfg, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         await ctx.answerCallbackQuery();
-        await ctx.editMessageText(t(lang, "admin.cfgMenu"), {
-            reply_markup: new InlineKeyboard()
-                .text("start", adm.cfgStart)
-                .text("home_menu", adm.cfgHome)
-                .row()
-                .text("explorer_main", adm.cfgExplorerMain)
-                .text("explorer_more", adm.cfgExplorerMore)
-                .row()
-                .text("settings", adm.cfgSettings)
-                .text("stats", adm.cfgStats)
-                .row()
-                .text(t(lang, "admin.cfgReset"), adm.cfgReset)
-                .text(t(lang, "admin.back"), adm.root),
-        });
+        const cfgKb = new InlineKeyboard();
+        for (let i = 0; i < CFG_SECTIONS.length; i++) {
+            const section = CFG_SECTIONS[i];
+            const cbMap = {
+                start: adm.cfgStart,
+                home_menu: adm.cfgHome,
+                explorer_main: adm.cfgExplorerMain,
+                explorer_more: adm.cfgExplorerMore,
+                settings: adm.cfgSettings,
+                stats: adm.cfgStats,
+            };
+            cfgKb.text(t(lang, `admin.cfgSection.${section}`), cbMap[section]);
+            if (i % 2 === 1)
+                cfgKb.row();
+        }
+        cfgKb.row().text(t(lang, "admin.cfgReset"), adm.cfgReset).text(t(lang, "admin.back"), adm.root);
+        await ctx.editMessageText(t(lang, "admin.cfgMenu"), { reply_markup: cfgKb });
     });
     bot.callbackQuery(adm.cfgReset, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
         await ctx.answerCallbackQuery();
         await setBotConfigDocument(DEFAULT_BOT_CONFIG);
         invalidateBotConfigCache();
-        await ctx.reply(t(adminLang(ctx), "admin.cfgResetDone"));
+        await ctx.reply(t(await resolveAdminLang(ctx.from?.id, ctx.from?.language_code), "admin.cfgResetDone"));
     });
     const cfgWait = (section) => async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         await ctx.answerCallbackQuery();
         const u = await getUserByTelegramId(ctx.from.id);
         if (!u)
@@ -595,9 +638,9 @@ export function setupAdmin(bot) {
     bot.callbackQuery(adm.cfgSettings, cfgWait("settings"));
     bot.callbackQuery(adm.cfgStats, cfgWait("stats"));
     bot.callbackQuery(adm.editMessages, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         await ctx.answerCallbackQuery();
         const kb = new InlineKeyboard();
         for (const key of BOT_MESSAGE_KEYS) {
@@ -607,9 +650,9 @@ export function setupAdmin(bot) {
         await ctx.editMessageText(t(lang, "admin.msgMenu"), { reply_markup: kb });
     });
     bot.callbackQuery(/^adm:msp:(.+)$/, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         const key = ctx.match?.[1] ?? "";
         if (!BOT_MESSAGE_KEYS.includes(key)) {
             await ctx.answerCallbackQuery();
@@ -625,9 +668,9 @@ export function setupAdmin(bot) {
         await ctx.reply(tf(lang, "admin.msgCurrent", { fa: current?.fa ?? "", en: current?.en ?? "" }));
     });
     bot.callbackQuery(adm.dim, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         await ctx.answerCallbackQuery();
         await ctx.editMessageText(t(lang, "admin.diamondMenu"), {
             reply_markup: new InlineKeyboard()
@@ -638,9 +681,9 @@ export function setupAdmin(bot) {
         });
     });
     bot.callbackQuery(adm.dimg, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         await ctx.answerCallbackQuery();
         const u = await getUserByTelegramId(ctx.from.id);
         if (!u)
@@ -649,9 +692,9 @@ export function setupAdmin(bot) {
         await ctx.reply(t(lang, "admin.diamondPrompt"));
     });
     bot.callbackQuery(adm.dimd, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         await ctx.answerCallbackQuery();
         const u = await getUserByTelegramId(ctx.from.id);
         if (!u)
@@ -660,9 +703,9 @@ export function setupAdmin(bot) {
         await ctx.reply(t(lang, "admin.diamondPrompt"));
     });
     bot.callbackQuery(/^adm:rnopes:(\d+)$/, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         const targetId = Number(ctx.match?.[1]);
         await ctx.answerCallbackQuery();
         await resetUserNopes(targetId);
@@ -670,9 +713,9 @@ export function setupAdmin(bot) {
         await ctx.reply(t(lang, "admin.nopesReset"));
     });
     bot.callbackQuery(/^adm:usrban:(\d+):(0|1)$/, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         const targetId = Number(ctx.match?.[1]);
         const doBan = ctx.match?.[2] === "1";
         await ctx.answerCallbackQuery();
@@ -688,9 +731,9 @@ export function setupAdmin(bot) {
         }
     });
     bot.callbackQuery(adm.sendUser, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         await ctx.answerCallbackQuery();
         const u = await getUserByTelegramId(ctx.from.id);
         if (!u)
@@ -699,9 +742,9 @@ export function setupAdmin(bot) {
         await ctx.reply(t(lang, "admin.sendUserPromptTg"));
     });
     bot.callbackQuery(adm.rewardNew, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         await ctx.answerCallbackQuery();
         const u = await getUserByTelegramId(ctx.from.id);
         if (!u)
@@ -710,9 +753,9 @@ export function setupAdmin(bot) {
         await ctx.reply(t(lang, "admin.rewardPrompt"));
     });
     bot.callbackQuery(adm.rewardList, async (ctx) => {
-        if (!isAdminTg(ctx.from?.id))
+        if (!isPanelAdmin(ctx.from?.id))
             return;
-        const lang = adminLang(ctx);
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         await ctx.answerCallbackQuery();
         const rows = await listReferralFileRewards();
         if (rows.length === 0) {
@@ -721,5 +764,44 @@ export function setupAdmin(bot) {
         }
         const lines = rows.map((r) => tf(lang, "admin.rewardRow", { id: r.id, n: r.min_referrals, fa: r.caption_fa }));
         await ctx.reply(lines.join("\n"), { reply_markup: new InlineKeyboard().text(t(lang, "admin.back"), adm.root) });
+    });
+    bot.callbackQuery(adm.startNotify, async (ctx) => {
+        if (!isPanelAdmin(ctx.from?.id))
+            return;
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+        await ctx.answerCallbackQuery();
+        const enabled = await isStartNotifyEnabled();
+        const groupId = await getStartNotifyGroupId();
+        const status = enabled ? t(lang, "admin.startNotifyEnabled") : t(lang, "admin.startNotifyDisabled");
+        const group = groupId != null ? String(groupId) : "—";
+        await ctx.editMessageText(tf(lang, "admin.startNotifyCurrent", { status, group }), {
+            reply_markup: new InlineKeyboard()
+                .text(t(lang, "admin.startNotifyToggle"), adm.startNotifyToggle)
+                .text(t(lang, "admin.startNotifySetGroup"), adm.startNotifySet)
+                .row()
+                .text(t(lang, "admin.back"), adm.root),
+        });
+    });
+    bot.callbackQuery(adm.startNotifyToggle, async (ctx) => {
+        if (!isPanelAdmin(ctx.from?.id))
+            return;
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+        const cur = await isStartNotifyEnabled();
+        await setSystemSetting("start_notify_enabled", !cur);
+        await ctx.answerCallbackQuery({
+            text: !cur ? t(lang, "admin.startNotifyEnabled") : t(lang, "admin.startNotifyDisabled"),
+            show_alert: false,
+        });
+    });
+    bot.callbackQuery(adm.startNotifySet, async (ctx) => {
+        if (!isPanelAdmin(ctx.from?.id))
+            return;
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+        await ctx.answerCallbackQuery();
+        const u = await getUserByTelegramId(ctx.from.id);
+        if (!u)
+            return;
+        await setSession(u.id, { state: "admin_start_notify_setup", payload: {} });
+        await ctx.reply(t(lang, "admin.startNotifySetPrompt"));
     });
 }

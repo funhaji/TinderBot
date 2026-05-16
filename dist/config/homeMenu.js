@@ -4,6 +4,7 @@ import { t } from "../i18n/index.js";
 export const HOME_MENU_ROWS = [
     ["profile", "explore"],
     ["mystery_room"],
+    ["verify_face"],
     ["settings", "stats"],
     ["likes", "matches", "share"],
 ];

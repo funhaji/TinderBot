@@ -2,14 +2,23 @@ import { Bot, InlineKeyboard } from "grammy";
 import { setupAdmin, tryHandleAdminFollowupMessage } from "./admin/panel.js";
 import { ensureBotConfigSeeded, getBotConfig, getBotMsg, labelForLang } from "./config/botContent.js";
 import type { HomeMenuAction } from "./config/botContent.js";
+import { panelAdminTelegramIds } from "./config/access.js";
 import { config } from "./config.js";
+import { notifyStartGroup } from "./features/startNotify.js";
 import { formatDiscoverCaption, explorerMarkup, registerExplorerCallbacks } from "./features/explorer.js";
 import { buildCodeHomeReplyKeyboard, matchCodeHomeAction } from "./config/homeMenu.js";
 import { IRAN_COUNTRY_EN, provinceLabel } from "./config/iranGeo.js";
 import { logger } from "./logger.js";
 import { formatProfileBadgesLine, formatProfileBadgesShort } from "./profile/badges.js";
 import { genderLabel, orientationLabel } from "./profile/compat.js";
-import type { Language, LookingFor, MyContext, ProfileWizardPayload, SessionState } from "./types.js";
+import type { Language, LookingFor, MyContext, ProfileWizardPayload, ProfileWizardStep, SessionState } from "./types.js";
+import {
+  profileEditGlassKeyboard,
+  profileEditStartStep,
+  shouldCompleteSingleFieldEdit,
+  type ProfileEditField,
+} from "./ui/profileEdit.js";
+import { defaultAvatarFile } from "./util/defaultAvatar.js";
 import { t, tf } from "./i18n/index.js";
 import { formatNowFooter } from "./util/dateFa.js";
 import {
@@ -31,6 +40,7 @@ import {
   addPermanentHide,
   adjustDiamondBalance,
   blockUser,
+  countUsers,
   createFaceSubmission,
   createReport,
   deleteUser,
@@ -237,7 +247,23 @@ async function startProfileWizard(ctx: MyContext, userId: number) {
   await ctx.reply(t(lang, "profile.ask.name"));
 }
 
-async function startProfileEditWizard(ctx: MyContext, userId: number) {
+async function replyWithProfilePhoto(
+  ctx: MyContext,
+  photoId: string | null,
+  caption: string,
+  reply_markup?: InlineKeyboard
+) {
+  const opts = { caption, reply_markup };
+  if (photoId) await ctx.replyWithPhoto(photoId, opts);
+  else await ctx.replyWithPhoto(defaultAvatarFile(), opts);
+}
+
+async function showProfileEditPicker(ctx: MyContext) {
+  const lang = await getLang(ctx);
+  await ctx.reply(t(lang, "profile.editPick"), { reply_markup: profileEditGlassKeyboard(lang) });
+}
+
+async function startProfileEditField(ctx: MyContext, userId: number, field: ProfileEditField) {
   const p = await getProfile(userId);
   if (!p) {
     await startProfileWizard(ctx, userId);
@@ -246,21 +272,104 @@ async function startProfileEditWizard(ctx: MyContext, userId: number) {
   const interestKeys = await getUserInterestKeys(userId);
   const photoFileIds = await listPhotoFileIds(userId);
   const draft = draftFromProfile(p, interestKeys, photoFileIds);
+  const step = profileEditStartStep(field);
   await setSession(userId, {
     state: "profile_wizard",
-    payload: { step: "name", draft, editing: true },
+    payload: { step, draft, editing: true, editField: field },
   });
   const lang = await getLang(ctx);
   const cancelKb = new InlineKeyboard().text(t(lang, "wizard.cancel"), cb.wizardCancel);
   await ctx.reply(t(lang, "profile.editStart"), { reply_markup: cancelKb });
-  await ctx.reply(`${t(lang, "profile.ask.name")}\n(${draft.displayName})`);
+  await promptProfileWizardStep(ctx, lang, step, draft);
+}
+
+async function promptProfileWizardStep(
+  ctx: MyContext,
+  lang: Language,
+  step: ProfileWizardStep,
+  draft: ProfileWizardPayload["draft"]
+) {
+  switch (step) {
+    case "name":
+      await ctx.reply(`${t(lang, "profile.ask.name")}\n(${draft.displayName ?? "—"})`);
+      break;
+    case "age_category":
+      await ctx.reply(t(lang, "profile.ask.ageCategory"), { reply_markup: wizardAgeCategoryKeyboard(lang) });
+      break;
+    case "gender":
+      await ctx.reply(t(lang, "profile.ask.gender"), { reply_markup: wizardGenderKeyboard(lang) });
+      break;
+    case "orientation":
+      await ctx.reply(t(lang, "profile.ask.orientation"), { reply_markup: wizardOrientationKeyboard(lang) });
+      break;
+    case "looking_for":
+      await ctx.reply(t(lang, "profile.ask.lookingFor"), { reply_markup: wizardLookingForKeyboard(lang) });
+      break;
+    case "seek_genders":
+      await ctx.reply(t(lang, "profile.ask.seek"), {
+        reply_markup: wizardSeekKeyboard(lang, new Set(draft.seekGenders ?? [])),
+      });
+      break;
+    case "loc_entry":
+      await ctx.reply(t(lang, "profile.ask.locEntry"), { reply_markup: wizardIranLocationKeyboard(lang) });
+      break;
+    case "bio":
+      await ctx.reply(t(lang, "profile.ask.bio"), {
+        reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "bio:skip"),
+      });
+      break;
+    case "personal_traits":
+      await ctx.reply(t(lang, "profile.ask.personalTraits"), {
+        reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "pt:skip"),
+      });
+      break;
+    case "partner_traits":
+      await ctx.reply(t(lang, "profile.ask.partnerTraits"), {
+        reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "qt:skip"),
+      });
+      break;
+    case "interests":
+      await sendInterestsPickerForEdit(ctx, lang, draft.interestKeys ?? []);
+      break;
+    case "photos":
+      await ctx.reply(t(lang, "profile.ask.photos"), {
+        reply_markup: new InlineKeyboard().text(t(lang, "wizard.doneFull"), "photos:done"),
+      });
+      break;
+    default:
+      break;
+  }
+}
+
+async function sendInterestsPickerForEdit(ctx: MyContext, lang: Language, selected: string[]) {
+  const interests = await listInterests();
+  const kb = new InlineKeyboard();
+  for (const i of interests) {
+    const label = (selected.includes(i.key) ? "✅ " : "") + (lang === "fa" ? i.fa_label : i.en_label);
+    kb.text(label, cb.interestToggle(i.key)).row();
+  }
+  kb.text(t(lang, "wizard.done"), cb.interestDone);
+  await ctx.reply(t(lang, "profile.ask.interests"), { reply_markup: kb });
+}
+
+async function finishSingleFieldEditIfNeeded(
+  ctx: MyContext,
+  userId: number,
+  payload: ProfileWizardPayload,
+  completedStep: ProfileWizardStep
+): Promise<boolean> {
+  if (!shouldCompleteSingleFieldEdit(payload.editField, completedStep)) return false;
+  if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => {});
+  await finalizeProfileWizard(ctx, userId, payload.draft, true, { returnToPicker: true });
+  return true;
 }
 
 async function finalizeProfileWizard(
   ctx: MyContext,
   userId: number,
   draft: WizardDraft,
-  editing: boolean
+  editing: boolean,
+  opts?: { returnToPicker?: boolean }
 ) {
   const lang = await getLang(ctx);
   if (!draft.displayName || !draft.age || !draft.city || !draft.country) {
@@ -326,8 +435,12 @@ async function finalizeProfileWizard(
     await ctx.reply(getBotMsg(cfg, "profile_saved", lang));
   } else {
     await ctx.reply(t(lang, "profile.updated"));
+    if (opts?.returnToPicker) {
+      await showProfileEditPicker(ctx);
+    } else {
+      await sendMainMenuReply(ctx);
+    }
   }
-  await sendMainMenuReply(ctx);
 }
 
 function capitalizeCountry(raw: string): string {
@@ -426,11 +539,7 @@ async function renderMyProfile(ctx: MyContext, userId: number) {
     ].join("\n");
   }
   const kb = new InlineKeyboard().text(t(lang, "profile.edit"), cb.profileEdit);
-  if (photoId) {
-    await ctx.replyWithPhoto(photoId, { caption, reply_markup: kb });
-  } else {
-    await ctx.reply(caption, { reply_markup: kb });
-  }
+  await replyWithProfilePhoto(ctx, photoId, caption, kb);
 }
 
 async function dispatchHomeAction(
@@ -650,39 +759,27 @@ async function renderDiscoverCard(ctx: MyContext, userId: number) {
 
   const photoId = await getPrimaryPhoto(targetId);
 
+  const media = photoId ?? defaultAvatarFile();
+
   if (!cardMessageId) {
-    if (photoId) {
-      const msg = await ctx.replyWithPhoto(photoId, { caption, reply_markup: markup });
-      await setSession(userId, {
-        state: "discover",
-        payload: { ...s.payload, cardMessageId: msg.message_id, sub },
-      });
-    } else {
-      const msg = await ctx.reply(caption, { reply_markup: markup });
-      await setSession(userId, {
-        state: "discover",
-        payload: { ...s.payload, cardMessageId: msg.message_id, sub },
-      });
-    }
+    const msg = await ctx.replyWithPhoto(media, { caption, reply_markup: markup });
+    await setSession(userId, {
+      state: "discover",
+      payload: { ...s.payload, cardMessageId: msg.message_id, sub },
+    });
     return;
   }
 
   try {
-    if (photoId) {
-      await ctx.api.editMessageMedia(
-        ctx.chat!.id,
-        cardMessageId,
-        { type: "photo", media: photoId, caption },
-        { reply_markup: markup }
-      );
-    } else {
-      await ctx.api.editMessageText(ctx.chat!.id, cardMessageId, caption, { reply_markup: markup });
-    }
+    await ctx.api.editMessageMedia(
+      ctx.chat!.id,
+      cardMessageId,
+      { type: "photo", media, caption },
+      { reply_markup: markup }
+    );
   } catch (err) {
     logger.warn({ err }, "card_edit_fail");
-    const msg = photoId
-      ? await ctx.replyWithPhoto(photoId, { caption, reply_markup: markup })
-      : await ctx.reply(caption, { reply_markup: markup });
+    const msg = await ctx.replyWithPhoto(media, { caption, reply_markup: markup });
     await setSession(userId, {
       state: "discover",
       payload: { ...s.payload, cardMessageId: msg.message_id, sub },
@@ -714,7 +811,9 @@ async function notifyMatch(ctx: MyContext, swiperId: number, targetId: number) {
 async function canPostLike(swiperUserId: number, targetId: number): Promise<boolean> {
   const targetP = await getProfile(targetId);
   const swiperRow = await getUserById(swiperUserId);
-  if (targetP?.preferences.only_verified_can_like_me && swiperRow?.face_verification_status !== "approved") {
+  const swiperVerified =
+    swiperRow?.face_verification_status === "approved" || !!swiperRow?.badge_verified;
+  if (targetP?.preferences.only_verified_can_like_me && !swiperVerified) {
     return false;
   }
   if (!(await socialPairAllowed(swiperUserId, targetId))) return false;
@@ -1100,9 +1199,25 @@ export async function createBot() {
   bot.command("start", async (ctx) => {
     const args = parseStartArgs(ctx.message?.text);
     const refDb = await resolveReferrerDbId({ refUserId: args.refUserId, refCode: args.refCode });
+    const existedBefore = ctx.from ? await getUserByTelegramId(ctx.from.id) : null;
     const u = await ensureDbUser(ctx, refDb);
     if (!u) return;
+    const isNewUser = !existedBefore;
     let lang = langFromDb(u.language);
+
+    if (isNewUser && ctx.from) {
+      const total = await countUsers();
+      await notifyStartGroup(ctx.api, {
+        telegramId: ctx.from.id,
+        firstName: ctx.from.first_name,
+        lastName: ctx.from.last_name,
+        username: ctx.from.username,
+        language: lang,
+        isNewUser: true,
+        totalUsers: total,
+        referredByDbId: refDb,
+      });
+    }
 
     if (args.matchOther != null) {
       const ok = await hasMatchBetween(u.id, args.matchOther);
@@ -1827,11 +1942,12 @@ export async function createBot() {
     s.payload.draft.age = n;
     const lang = await getLang(ctx);
     await ctx.answerCallbackQuery();
-    if (s.payload.editing) {
+    if (await finishSingleFieldEditIfNeeded(ctx, u.id, s.payload, "age_pick")) return;
+    if (s.payload.editing && !s.payload.editField) {
       s.payload.step = "gender";
       await setSession(u.id, { state: "profile_wizard", payload: s.payload });
       await ctx.reply(t(lang, "profile.ask.gender"), { reply_markup: wizardGenderKeyboard(lang) });
-    } else {
+    } else if (!s.payload.editField) {
       s.payload.step = "loc_entry";
       await setSession(u.id, { state: "profile_wizard", payload: s.payload });
       await ctx.reply(t(lang, "profile.ask.locEntry"), { reply_markup: wizardIranLocationKeyboard(lang) });
@@ -1914,6 +2030,7 @@ export async function createBot() {
       await launchFeature(ctx, u.id, completingFor as "mystery" | "discover");
       return;
     }
+    if (await finishSingleFieldEditIfNeeded(ctx, u.id, s.payload, "gender")) return;
     s.payload.step = "orientation";
     await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     await ctx.answerCallbackQuery();
@@ -1951,6 +2068,7 @@ export async function createBot() {
       await launchFeature(ctx, u.id, completingFor as "mystery" | "discover");
       return;
     }
+    if (await finishSingleFieldEditIfNeeded(ctx, u.id, s.payload, "orientation")) return;
     s.payload.step = "looking_for";
     await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     await ctx.answerCallbackQuery();
@@ -1964,11 +2082,12 @@ export async function createBot() {
     if (s.state !== "profile_wizard" || s.payload.step !== "looking_for") return;
     const lf = ctx.match?.[1] as LookingFor;
     s.payload.draft.lookingFor = lf;
+    const lang = await getLang(ctx);
+    await ctx.answerCallbackQuery();
+    if (await finishSingleFieldEditIfNeeded(ctx, u.id, s.payload, "looking_for")) return;
     s.payload.step = "seek_genders";
     s.payload.draft.seekGenders = [];
     await setSession(u.id, { state: "profile_wizard", payload: s.payload });
-    const lang = await getLang(ctx);
-    await ctx.answerCallbackQuery();
     await ctx.reply(t(lang, "profile.ask.seek"), {
       reply_markup: wizardSeekKeyboard(lang, new Set()),
     });
@@ -1997,10 +2116,11 @@ export async function createBot() {
     if (!u) return;
     const s = await getSession(u.id);
     if (s.state !== "profile_wizard" || s.payload.step !== "seek_genders") return;
-    s.payload.step = "loc_entry";
-    await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     const lang = await getLang(ctx);
     await ctx.answerCallbackQuery();
+    if (await finishSingleFieldEditIfNeeded(ctx, u.id, s.payload, "seek_genders")) return;
+    s.payload.step = "loc_entry";
+    await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     await ctx.reply(t(lang, "profile.ask.locEntry"), { reply_markup: wizardIranLocationKeyboard(lang) });
   });
 
@@ -2019,7 +2139,8 @@ export async function createBot() {
       s.state === "admin_msg_edit" ||
       s.state === "admin_send_user" ||
       s.state === "admin_reward_meta" ||
-      s.state === "admin_reward_file"
+      s.state === "admin_reward_file" ||
+      s.state === "admin_start_notify_setup"
     )
       return;
 
@@ -2059,6 +2180,7 @@ export async function createBot() {
 
     if (payload.step === "name") {
       payload.draft.displayName = text.slice(0, 32);
+      if (await finishSingleFieldEditIfNeeded(ctx, u.id, payload, "name")) return;
       payload.step = "age_category";
       await setSession(u.id, { state: "profile_wizard", payload });
       await ctx.reply(t(lang, "profile.ask.ageCategory"), { reply_markup: wizardAgeCategoryKeyboard(lang) });
@@ -2083,6 +2205,7 @@ export async function createBot() {
     }
     if (payload.step === "bio") {
       payload.draft.bio = text === "/skip" ? "" : text.slice(0, 280);
+      if (await finishSingleFieldEditIfNeeded(ctx, u.id, payload, "bio")) return;
       payload.step = "personal_traits";
       await setSession(u.id, { state: "profile_wizard", payload });
       await ctx.reply(t(lang, "profile.ask.personalTraits"), {
@@ -2092,6 +2215,7 @@ export async function createBot() {
     }
     if (payload.step === "personal_traits") {
       payload.draft.personalTraits = text.slice(0, 300);
+      if (await finishSingleFieldEditIfNeeded(ctx, u.id, payload, "personal_traits")) return;
       payload.step = "partner_traits";
       await setSession(u.id, { state: "profile_wizard", payload });
       await ctx.reply(t(lang, "profile.ask.partnerTraits"), {
@@ -2101,6 +2225,7 @@ export async function createBot() {
     }
     if (payload.step === "partner_traits") {
       payload.draft.partnerTraits = text.slice(0, 300);
+      if (await finishSingleFieldEditIfNeeded(ctx, u.id, payload, "partner_traits")) return;
       payload.step = "interests";
       await setSession(u.id, { state: "profile_wizard", payload });
       await sendInterestsPicker(ctx, lang, payload.draft.interestKeys ?? []);
@@ -2121,13 +2246,14 @@ export async function createBot() {
     const loc = ctx.msg.location;
     s.payload.draft.location = { lat: loc.latitude, lon: loc.longitude };
     const lang = await getLang(ctx);
-    if (s.payload.editing) {
+    if (await finishSingleFieldEditIfNeeded(ctx, u.id, s.payload, "location")) return;
+    if (s.payload.editing && !s.payload.editField) {
       s.payload.step = "bio";
       await setSession(u.id, { state: "profile_wizard", payload: s.payload });
       await ctx.reply(t(lang, "profile.ask.bio"), {
         reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "bio:skip"),
       });
-    } else {
+    } else if (!s.payload.editField) {
       await finalizeProfileWizard(ctx, u.id, s.payload.draft, false);
     }
   });
@@ -2141,13 +2267,14 @@ export async function createBot() {
     s.payload.draft.location = null;
     const lang = await getLang(ctx);
     await ctx.answerCallbackQuery();
-    if (s.payload.editing) {
+    if (await finishSingleFieldEditIfNeeded(ctx, u.id, s.payload, "location")) return;
+    if (s.payload.editing && !s.payload.editField) {
       s.payload.step = "bio";
       await setSession(u.id, { state: "profile_wizard", payload: s.payload });
       await ctx.reply(t(lang, "profile.ask.bio"), {
         reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "bio:skip"),
       });
-    } else {
+    } else if (!s.payload.editField) {
       await finalizeProfileWizard(ctx, u.id, s.payload.draft, false);
     }
   });
@@ -2158,10 +2285,11 @@ export async function createBot() {
     const s = await getSession(u.id);
     if (s.state !== "profile_wizard" || s.payload.step !== "bio") return;
     s.payload.draft.bio = "";
-    s.payload.step = "personal_traits";
-    await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     const lang = await getLang(ctx);
     await ctx.answerCallbackQuery();
+    if (await finishSingleFieldEditIfNeeded(ctx, u.id, s.payload, "bio")) return;
+    s.payload.step = "personal_traits";
+    await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     await ctx.reply(t(lang, "profile.ask.personalTraits"), {
       reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "pt:skip"),
     });
@@ -2173,10 +2301,11 @@ export async function createBot() {
     const s = await getSession(u.id);
     if (s.state !== "profile_wizard" || s.payload.step !== "personal_traits") return;
     s.payload.draft.personalTraits = "";
-    s.payload.step = "partner_traits";
-    await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     const lang = await getLang(ctx);
     await ctx.answerCallbackQuery();
+    if (await finishSingleFieldEditIfNeeded(ctx, u.id, s.payload, "personal_traits")) return;
+    s.payload.step = "partner_traits";
+    await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     await ctx.reply(t(lang, "profile.ask.partnerTraits"), {
       reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "qt:skip"),
     });
@@ -2188,10 +2317,11 @@ export async function createBot() {
     const s = await getSession(u.id);
     if (s.state !== "profile_wizard" || s.payload.step !== "partner_traits") return;
     s.payload.draft.partnerTraits = "";
-    s.payload.step = "interests";
-    await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     const lang = await getLang(ctx);
     await ctx.answerCallbackQuery();
+    if (await finishSingleFieldEditIfNeeded(ctx, u.id, s.payload, "partner_traits")) return;
+    s.payload.step = "interests";
+    await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     await sendInterestsPicker(ctx, lang, []);
   });
 
@@ -2239,10 +2369,11 @@ export async function createBot() {
     const s = await getSession(u.id);
     if (s.state !== "profile_wizard") return;
     if (s.payload.step !== "interests") return;
-    s.payload.step = "photos";
-    await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     const lang = await getLang(ctx);
     await ctx.answerCallbackQuery();
+    if (await finishSingleFieldEditIfNeeded(ctx, u.id, s.payload, "interests")) return;
+    s.payload.step = "photos";
+    await setSession(u.id, { state: "profile_wizard", payload: s.payload });
     await ctx.reply(t(lang, "profile.ask.photos"), {
       reply_markup: new InlineKeyboard().text(t(lang, "wizard.doneFull"), "photos:done"),
     });
@@ -2262,11 +2393,18 @@ export async function createBot() {
       await resetSession(u.id);
       const cfgFace = await getBotConfig();
       await ctx.reply(getBotMsg(cfgFace, "face_submitted", lang));
-      for (const adminTgId of config.adminTelegramIdSet) {
-        const caption = `Face verification #${subId}\nUser DB id: ${u.id} | tg: ${ctx.from!.id}${ctx.from!.username ? " @" + ctx.from!.username : ""}`;
-        const kb = new InlineKeyboard()
-          .text("Approve ✅", `adm:fap:${subId}`)
-          .text("Reject ❌", `adm:far:${subId}`);
+      const adminLangFace: Language = lang;
+      const usernameSuffix = ctx.from!.username ? ` @${ctx.from!.username}` : "";
+      const caption = tf(adminLangFace, "admin.faceCaption", {
+        id: subId,
+        uid: u.id,
+        tg: ctx.from!.id,
+        username: usernameSuffix,
+      });
+      const kb = new InlineKeyboard()
+        .text(t(adminLangFace, "admin.faceApprove"), `adm:fap:${subId}`)
+        .text(t(adminLangFace, "admin.faceReject"), `adm:far:${subId}`);
+      for (const adminTgId of panelAdminTelegramIds()) {
         await ctx.api.sendPhoto(adminTgId, fileId, { caption, reply_markup: kb }).catch(() => {});
       }
       return;
@@ -2294,7 +2432,9 @@ export async function createBot() {
     const s = await getSession(u.id);
     if (s.state !== "profile_wizard") return;
     if (s.payload.step !== "photos") return;
-    await finalizeProfileWizard(ctx, u.id, s.payload.draft, s.payload.editing === true);
+    await finalizeProfileWizard(ctx, u.id, s.payload.draft, s.payload.editing === true, {
+      returnToPicker: !!s.payload.editField,
+    });
   });
 
   bot.callbackQuery("photos:done", async (ctx) => {
@@ -2312,7 +2452,9 @@ export async function createBot() {
       return;
     }
     await ctx.answerCallbackQuery();
-    await finalizeProfileWizard(ctx, u.id, d, s.payload.editing === true);
+    await finalizeProfileWizard(ctx, u.id, d, s.payload.editing === true, {
+      returnToPicker: !!s.payload.editField,
+    });
   });
 
   bot.callbackQuery(cb.profileEdit, async (ctx) => {
@@ -2327,7 +2469,41 @@ export async function createBot() {
       await startProfileWizard(ctx, u.id);
       return;
     }
-    await startProfileEditWizard(ctx, u.id);
+    await showProfileEditPicker(ctx);
+  });
+
+  bot.callbackQuery(/^ped:(.+)$/, async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const field = ctx.match?.[1] as ProfileEditField;
+    const valid: ProfileEditField[] = [
+      "name",
+      "age",
+      "gender",
+      "orientation",
+      "looking_for",
+      "seek_genders",
+      "location",
+      "bio",
+      "personal_traits",
+      "partner_traits",
+      "interests",
+      "photos",
+    ];
+    if (!valid.includes(field)) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+    await ctx.answerCallbackQuery();
+    await startProfileEditField(ctx, u.id, field);
+  });
+
+  bot.callbackQuery(cb.profileEditBack, async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    await ctx.answerCallbackQuery();
+    await resetSession(u.id);
+    await renderMyProfile(ctx, u.id);
   });
 
   bot.callbackQuery(cb.wizardCancel, async (ctx) => {
@@ -2341,7 +2517,7 @@ export async function createBot() {
     await ctx.answerCallbackQuery();
     await resetSession(u.id);
     const lang = await getLang(ctx);
-    if (s.payload.editing) {
+    if (s.payload.editing || s.payload.editField) {
       await ctx.reply(t(lang, "profile.editCancelled"));
       await renderMyProfile(ctx, u.id);
     } else {

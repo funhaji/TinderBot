@@ -1,4 +1,5 @@
 import type { Context } from "grammy";
+import type { ProfileEditField } from "./ui/profileEdit.js";
 
 export type Language = "fa" | "en";
 
@@ -17,7 +18,8 @@ export type SessionState =
   | { state: "admin_diamond_wait"; payload: { mode: "grant" | "deduct" } }
   | { state: "admin_send_user"; payload: { step: "await_telegram" | "await_text"; targetTelegram?: number } }
   | { state: "admin_reward_meta"; payload: Record<string, unknown> }
-  | { state: "admin_reward_file"; payload: { minReferrals: number; captionFa: string; captionEn: string } };
+  | { state: "admin_reward_file"; payload: { minReferrals: number; captionFa: string; captionEn: string } }
+  | { state: "admin_start_notify_setup"; payload: Record<string, unknown> };
 
 export type ProfileWizardStep =
   | "name"
@@ -43,6 +45,8 @@ export type ProfileWizardPayload = {
   step: ProfileWizardStep;
   /** True when re-saving an existing profile (skip first-time rewards). */
   editing?: boolean;
+  /** When set, only this field is edited then user returns to the glass picker. */
+  editField?: ProfileEditField;
   draft: {
     displayName?: string;
     age?: number;

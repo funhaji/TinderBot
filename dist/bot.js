@@ -1,17 +1,39 @@
 import { Bot, InlineKeyboard } from "grammy";
 import { setupAdmin, tryHandleAdminFollowupMessage } from "./admin/panel.js";
 import { ensureBotConfigSeeded, getBotConfig, getBotMsg, labelForLang } from "./config/botContent.js";
+import { panelAdminTelegramIds } from "./config/access.js";
 import { config } from "./config.js";
+import { notifyStartGroup } from "./features/startNotify.js";
 import { formatDiscoverCaption, explorerMarkup, registerExplorerCallbacks } from "./features/explorer.js";
 import { buildCodeHomeReplyKeyboard, matchCodeHomeAction } from "./config/homeMenu.js";
 import { IRAN_COUNTRY_EN, provinceLabel } from "./config/iranGeo.js";
 import { logger } from "./logger.js";
 import { formatProfileBadgesLine, formatProfileBadgesShort } from "./profile/badges.js";
 import { genderLabel, orientationLabel } from "./profile/compat.js";
+import { profileEditGlassKeyboard, profileEditStartStep, shouldCompleteSingleFieldEdit, } from "./ui/profileEdit.js";
+import { defaultAvatarFile } from "./util/defaultAvatar.js";
 import { t, tf } from "./i18n/index.js";
 import { formatNowFooter } from "./util/dateFa.js";
-import { cb, langKeyboard, seekGenderKeyboard, settingsKeyboardFull, settingsLangPickKb, wizardOrientationKeyboard, wizardLookingForKeyboard, wizardSeekKeyboard, wizardAgeCategoryKeyboard, wizardAgePickKeyboard, wizardIranLocationKeyboard, } from "./ui/keyboards.js";
-import { addPermanentHide, adjustDiamondBalance, blockUser, createFaceSubmission, createReport, deleteUser, discoveryCandidates, ensureMatch, ensureSessionRow, extendedUserStats, getPrimaryPhoto, listPhotoFileIds, getProfile, getSession, getTelegramIdByUserId, findMysteryWaitUser, expireMysteryWaitSessions, expireMysteryVoteSessions, applyReferralMilestonesForReferrer, claimReferralFileReward, getUserByReferralCode, listUnclaimedReferralFileRewardsForUser, socialPairAllowed, getUserById, getUserByTelegramId, getUserInterestKeys, hasLiked, hasMatchBetween, insertMessageLog, insertProfileImpression, listInterests, listLikersNotMatched, listMatchesFor, listTelegramIdsForBroadcast, markReferralBonusPaid, mergeProfilePreferences, replacePhotos, resetSession, setLanguage, setProfileVisibility, setSession, setUserInterests, swipe, upsertProfile, upsertUser, getSystemSettingNumber, } from "./db/repo.js";
+import { cb, langKeyboard, seekGenderKeyboard, settingsKeyboardFull, settingsLangPickKb, wizardGenderKeyboard, wizardOrientationKeyboard, wizardLookingForKeyboard, wizardSeekKeyboard, wizardAgeCategoryKeyboard, wizardAgePickKeyboard, wizardIranLocationKeyboard, } from "./ui/keyboards.js";
+import { addPermanentHide, adjustDiamondBalance, blockUser, countUsers, createFaceSubmission, createReport, deleteUser, discoveryCandidates, ensureMatch, ensureSessionRow, extendedUserStats, getPrimaryPhoto, listPhotoFileIds, getProfile, getSession, getTelegramIdByUserId, findMysteryWaitUser, expireMysteryWaitSessions, expireMysteryVoteSessions, applyReferralMilestonesForReferrer, claimReferralFileReward, getUserByReferralCode, listUnclaimedReferralFileRewardsForUser, socialPairAllowed, getUserById, getUserByTelegramId, getUserInterestKeys, hasLiked, hasMatchBetween, insertMessageLog, insertProfileImpression, listInterests, listLikersNotMatched, listMatchesFor, listTelegramIdsForBroadcast, markReferralBonusPaid, mergeProfilePreferences, replacePhotos, resetSession, setLanguage, setProfileVisibility, setSession, setUserInterests, swipe, upsertProfile, upsertUser, getSystemSettingNumber, } from "./db/repo.js";
+// ── Hardcoded mystery-room strings (no i18n file edits needed) ──────────────
+const MR = {
+    prefGender: { fa: "🧭 می‌خوای با کی حرف بزنی؟", en: "🧭 Who do you want to talk to?" },
+    "prefGender.m": { fa: "👦 پسر", en: "👦 Boy" },
+    "prefGender.f": { fa: "👧 دختر", en: "👧 Girl" },
+    "prefGender.x": { fa: "⚧ نان‌باینری / دیگر", en: "⚧ Non-binary / Other" },
+    "prefGender.any": { fa: "🎲 هر کسی", en: "🎲 Anyone" },
+    prefAge: { fa: "📅 محدوده سنی مورد نظر؟", en: "📅 Preferred age range?" },
+    "prefAge.close": { fa: "🎯 نزدیک به سن من", en: "🎯 Close to my age" },
+    "prefAge.any": { fa: "🔓 هر سنی", en: "🔓 Any age" },
+    prefCountry: { fa: "🌍 هم‌وطن باشه؟", en: "🌍 Same country?" },
+    "prefCountry.yes": { fa: "✅ بله، هم‌کشوری", en: "✅ Yes, same country" },
+    "prefCountry.no": { fa: "🌐 مهم نیست", en: "🌐 Doesn't matter" },
+};
+function mr(lang, key) {
+    return MR[key]?.[lang] ?? key;
+}
+// ────────────────────────────────────────────────────────────────────────────
 function langFromDb(v) {
     return v === "fa" ? "fa" : "en";
 }
@@ -143,7 +165,18 @@ async function startProfileWizard(ctx, userId) {
     const lang = await getLang(ctx);
     await ctx.reply(t(lang, "profile.ask.name"));
 }
-async function startProfileEditWizard(ctx, userId) {
+async function replyWithProfilePhoto(ctx, photoId, caption, reply_markup) {
+    const opts = { caption, reply_markup };
+    if (photoId)
+        await ctx.replyWithPhoto(photoId, opts);
+    else
+        await ctx.replyWithPhoto(defaultAvatarFile(), opts);
+}
+async function showProfileEditPicker(ctx) {
+    const lang = await getLang(ctx);
+    await ctx.reply(t(lang, "profile.editPick"), { reply_markup: profileEditGlassKeyboard(lang) });
+}
+async function startProfileEditField(ctx, userId, field) {
     const p = await getProfile(userId);
     if (!p) {
         await startProfileWizard(ctx, userId);
@@ -152,16 +185,85 @@ async function startProfileEditWizard(ctx, userId) {
     const interestKeys = await getUserInterestKeys(userId);
     const photoFileIds = await listPhotoFileIds(userId);
     const draft = draftFromProfile(p, interestKeys, photoFileIds);
+    const step = profileEditStartStep(field);
     await setSession(userId, {
         state: "profile_wizard",
-        payload: { step: "name", draft, editing: true },
+        payload: { step, draft, editing: true, editField: field },
     });
     const lang = await getLang(ctx);
     const cancelKb = new InlineKeyboard().text(t(lang, "wizard.cancel"), cb.wizardCancel);
     await ctx.reply(t(lang, "profile.editStart"), { reply_markup: cancelKb });
-    await ctx.reply(`${t(lang, "profile.ask.name")}\n(${draft.displayName})`);
+    await promptProfileWizardStep(ctx, lang, step, draft);
 }
-async function finalizeProfileWizard(ctx, userId, draft, editing) {
+async function promptProfileWizardStep(ctx, lang, step, draft) {
+    switch (step) {
+        case "name":
+            await ctx.reply(`${t(lang, "profile.ask.name")}\n(${draft.displayName ?? "—"})`);
+            break;
+        case "age_category":
+            await ctx.reply(t(lang, "profile.ask.ageCategory"), { reply_markup: wizardAgeCategoryKeyboard(lang) });
+            break;
+        case "gender":
+            await ctx.reply(t(lang, "profile.ask.gender"), { reply_markup: wizardGenderKeyboard(lang) });
+            break;
+        case "orientation":
+            await ctx.reply(t(lang, "profile.ask.orientation"), { reply_markup: wizardOrientationKeyboard(lang) });
+            break;
+        case "looking_for":
+            await ctx.reply(t(lang, "profile.ask.lookingFor"), { reply_markup: wizardLookingForKeyboard(lang) });
+            break;
+        case "seek_genders":
+            await ctx.reply(t(lang, "profile.ask.seek"), {
+                reply_markup: wizardSeekKeyboard(lang, new Set(draft.seekGenders ?? [])),
+            });
+            break;
+        case "loc_entry":
+            await ctx.reply(t(lang, "profile.ask.locEntry"), { reply_markup: wizardIranLocationKeyboard(lang) });
+            break;
+        case "bio":
+            await ctx.reply(t(lang, "profile.ask.bio"), {
+                reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "bio:skip"),
+            });
+            break;
+        case "personal_traits":
+            await ctx.reply(t(lang, "profile.ask.personalTraits"), {
+                reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "pt:skip"),
+            });
+            break;
+        case "partner_traits":
+            await ctx.reply(t(lang, "profile.ask.partnerTraits"), {
+                reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "qt:skip"),
+            });
+            break;
+        case "interests":
+            await sendInterestsPickerForEdit(ctx, lang, draft.interestKeys ?? []);
+            break;
+        case "photos":
+            await ctx.reply(t(lang, "profile.ask.photos"), {
+                reply_markup: new InlineKeyboard().text(t(lang, "wizard.doneFull"), "photos:done"),
+            });
+            break;
+        default:
+            break;
+    }
+}
+async function sendInterestsPickerForEdit(ctx, lang, selected) {
+    const interests = await listInterests();
+    const kb = new InlineKeyboard();
+    for (const i of interests) {
+        const label = (selected.includes(i.key) ? "✅ " : "") + (lang === "fa" ? i.fa_label : i.en_label);
+        kb.text(label, cb.interestToggle(i.key)).row();
+    }
+    kb.text(t(lang, "wizard.done"), cb.interestDone);
+    await ctx.reply(t(lang, "profile.ask.interests"), { reply_markup: kb });
+}
+async function finishSingleFieldEditIfNeeded(ctx, userId, payload, completedStep) {
+    if (!shouldCompleteSingleFieldEdit(payload.editField, completedStep))
+        return false;
+    await finalizeProfileWizard(ctx, userId, payload.draft, true, { returnToPicker: true });
+    return true;
+}
+async function finalizeProfileWizard(ctx, userId, draft, editing, opts) {
     const lang = await getLang(ctx);
     if (!draft.displayName || !draft.age || !draft.city || !draft.country) {
         await ctx.reply(t(lang, "errors.generic"));
@@ -226,8 +328,13 @@ async function finalizeProfileWizard(ctx, userId, draft, editing) {
     }
     else {
         await ctx.reply(t(lang, "profile.updated"));
+        if (opts?.returnToPicker) {
+            await showProfileEditPicker(ctx);
+        }
+        else {
+            await sendMainMenuReply(ctx);
+        }
     }
-    await sendMainMenuReply(ctx);
 }
 function capitalizeCountry(raw) {
     return raw.trim().split(/\s+/).map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
@@ -329,12 +436,7 @@ async function renderMyProfile(ctx, userId) {
         ].join("\n");
     }
     const kb = new InlineKeyboard().text(t(lang, "profile.edit"), cb.profileEdit);
-    if (photoId) {
-        await ctx.replyWithPhoto(photoId, { caption, reply_markup: kb });
-    }
-    else {
-        await ctx.reply(caption, { reply_markup: kb });
-    }
+    await replyWithProfilePhoto(ctx, photoId, caption, kb);
 }
 async function dispatchHomeAction(ctx, u, action) {
     const cfg = await getBotConfig();
@@ -386,6 +488,73 @@ async function dispatchHomeAction(ctx, u, action) {
             await ctx.reply(toast);
     }
 }
+async function startFeatureSetupWizard(ctx, userId, feature) {
+    const p = await getProfile(userId);
+    if (!p)
+        return;
+    const lang = await getLang(ctx);
+    const draft = {
+        displayName: p.display_name,
+        age: p.age,
+        city: p.city,
+        country: p.preferences?.country ?? "",
+        provinceKey: p.preferences?.province_key ?? null,
+        ageCategory: ageCategoryFromAge(p.age),
+        gender: p.gender,
+        orientation: p.preferences?.orientation ?? null,
+        lookingFor: p.preferences?.looking_for ?? "both",
+        seekGenders: p.preferences?.seek_genders ?? [],
+        bio: p.bio ?? "",
+        personalTraits: p.preferences?.personal_traits ?? "",
+        partnerTraits: p.preferences?.partner_traits ?? "",
+        location: p.location_lat != null && p.location_lon != null
+            ? { lat: p.location_lat, lon: p.location_lon }
+            : null,
+        interestKeys: [],
+        photoFileIds: [],
+    };
+    draft.completingFor = feature;
+    if (!p.gender) {
+        await setSession(userId, { state: "profile_wizard", payload: { step: "gender", draft, editing: false } });
+        await ctx.reply(t(lang, "profile.ask.gender"), { reply_markup: wizardGenderKeyboard(lang) });
+        return;
+    }
+    await setSession(userId, { state: "profile_wizard", payload: { step: "orientation", draft, editing: false } });
+    await ctx.reply(t(lang, "profile.ask.orientation"), { reply_markup: wizardOrientationKeyboard(lang) });
+}
+async function launchFeature(ctx, userId, feature) {
+    if (feature === "mystery")
+        await launchMysteryWelcome(ctx, userId);
+    else
+        await discoverCore(ctx, userId);
+}
+async function launchMysteryWelcome(ctx, userId) {
+    const lang = await getLang(ctx);
+    const cfg = await getBotConfig();
+    const kb = new InlineKeyboard().text(t(lang, "mystery.welcome.start"), "mr:start");
+    await ctx.reply(getBotMsg(cfg, "mystery_welcome", lang), { reply_markup: kb });
+}
+async function discoverCore(ctx, userId) {
+    const lang = await getLang(ctx);
+    await ctx.api.sendChatAction(ctx.chat.id, "typing").catch(() => { });
+    const p = await getProfile(userId);
+    if (!p)
+        return;
+    const radius = effectiveDiscoveryRadiusMeters(p);
+    const candidates = await discoveryCandidates({
+        meId: userId,
+        lat: p.location_lat,
+        lon: p.location_lon,
+        radiusMeters: radius,
+        limit: config.DISCOVERY_BATCH_SIZE,
+    });
+    if (candidates.length === 0) {
+        await ctx.reply(t(lang, "discover.noCandidates"));
+        return;
+    }
+    await setSession(userId, { state: "discover", payload: { candidates, idx: 0, sub: "main" } });
+    await renderDiscoverCard(ctx, userId);
+}
 async function startMysteryRoom(ctx, userId) {
     const lang = await getLang(ctx);
     const s = await getSession(userId);
@@ -407,52 +576,31 @@ async function startMysteryRoom(ctx, userId) {
     }
     const p = await getProfile(userId);
     if (!p) {
-        const cfgMr = await getBotConfig();
-        await ctx.reply(getBotMsg(cfgMr, "no_profile", lang));
+        const cfg = await getBotConfig();
+        await ctx.reply(getBotMsg(cfg, "no_profile", lang));
         await startProfileWizard(ctx, userId);
         return;
     }
-    // Check profile completeness for Mystery Room
-    const prfs = p.preferences ?? {};
-    const hasRequired = p.display_name && p.age && p.city && p.gender &&
-        prfs.orientation && prfs.orientation !== "skip";
-    if (!hasRequired) {
-        await ctx.reply(t(lang, "mystery.profileRequired"));
+    if (!p.gender || !p.preferences?.orientation || p.preferences.orientation === "skip") {
+        await startFeatureSetupWizard(ctx, userId, "mystery");
         return;
     }
-    // Show welcome screen
-    const cfgMr = await getBotConfig();
-    const welcomeText = getBotMsg(cfgMr, "mystery_welcome", lang);
-    const kb = new InlineKeyboard().text(t(lang, "mystery.welcome.start"), "mr:start");
-    await ctx.reply(welcomeText, { reply_markup: kb });
+    await launchMysteryWelcome(ctx, userId);
 }
 async function discoverStart(ctx, userId) {
     const lang = await getLang(ctx);
-    await ctx.api.sendChatAction(ctx.chat.id, "typing").catch(() => { });
     const p = await getProfile(userId);
     if (!p) {
-        const cfgNp = await getBotConfig();
-        await ctx.reply(getBotMsg(cfgNp, "no_profile", lang));
+        const cfg = await getBotConfig();
+        await ctx.reply(getBotMsg(cfg, "no_profile", lang));
         await startProfileWizard(ctx, userId);
         return;
     }
-    const radius = effectiveDiscoveryRadiusMeters(p);
-    const candidates = await discoveryCandidates({
-        meId: userId,
-        lat: p.location_lat,
-        lon: p.location_lon,
-        radiusMeters: radius,
-        limit: config.DISCOVERY_BATCH_SIZE,
-    });
-    if (candidates.length === 0) {
-        await ctx.reply(t(lang, "discover.noCandidates"));
+    if (!p.gender || !p.preferences?.orientation || p.preferences.orientation === "skip") {
+        await startFeatureSetupWizard(ctx, userId, "discover");
         return;
     }
-    await setSession(userId, {
-        state: "discover",
-        payload: { candidates, idx: 0, sub: "main" },
-    });
-    await renderDiscoverCard(ctx, userId);
+    await discoverCore(ctx, userId);
 }
 async function renderDiscoverCard(ctx, userId) {
     const lang = await getLang(ctx);
@@ -497,40 +645,21 @@ async function renderDiscoverCard(ctx, userId) {
     });
     const markup = explorerMarkup(cfg, lang, sub);
     const photoId = await getPrimaryPhoto(targetId);
+    const media = photoId ?? defaultAvatarFile();
     if (!cardMessageId) {
-        if (photoId) {
-            const msg = await ctx.replyWithPhoto(photoId, { caption, reply_markup: markup });
-            await setSession(userId, {
-                state: "discover",
-                payload: { ...s.payload, cardMessageId: msg.message_id, sub },
-            });
-        }
-        else {
-            const msg = await ctx.reply(caption, { reply_markup: markup });
-            await setSession(userId, {
-                state: "discover",
-                payload: { ...s.payload, cardMessageId: msg.message_id, sub },
-            });
-        }
+        const msg = await ctx.replyWithPhoto(media, { caption, reply_markup: markup });
+        await setSession(userId, {
+            state: "discover",
+            payload: { ...s.payload, cardMessageId: msg.message_id, sub },
+        });
         return;
     }
     try {
-        if (photoId) {
-            await ctx.api.editMessageMedia(ctx.chat.id, cardMessageId, {
-                type: "photo",
-                media: photoId,
-                caption,
-            }, { reply_markup: markup });
-        }
-        else {
-            await ctx.api.editMessageText(ctx.chat.id, cardMessageId, caption, { reply_markup: markup });
-        }
+        await ctx.api.editMessageMedia(ctx.chat.id, cardMessageId, { type: "photo", media, caption }, { reply_markup: markup });
     }
     catch (err) {
         logger.warn({ err }, "card_edit_fail");
-        const msg = photoId
-            ? await ctx.replyWithPhoto(photoId, { caption, reply_markup: markup })
-            : await ctx.reply(caption, { reply_markup: markup });
+        const msg = await ctx.replyWithPhoto(media, { caption, reply_markup: markup });
         await setSession(userId, {
             state: "discover",
             payload: { ...s.payload, cardMessageId: msg.message_id, sub },
@@ -560,7 +689,8 @@ async function notifyMatch(ctx, swiperId, targetId) {
 async function canPostLike(swiperUserId, targetId) {
     const targetP = await getProfile(targetId);
     const swiperRow = await getUserById(swiperUserId);
-    if (targetP?.preferences.only_verified_can_like_me && swiperRow?.face_verification_status !== "approved") {
+    const swiperVerified = swiperRow?.face_verification_status === "approved" || !!swiperRow?.badge_verified;
+    if (targetP?.preferences.only_verified_can_like_me && !swiperVerified) {
         return false;
     }
     if (!(await socialPairAllowed(swiperUserId, targetId)))
@@ -893,7 +1023,6 @@ export async function createBot() {
         }
         if (s.state !== "chat")
             return next();
-        // Mystery chat: check 15-minute timeout
         if (s.payload.isMystery && s.payload.startedAt) {
             const elapsed = Date.now() - s.payload.startedAt;
             if (elapsed > 15 * 60 * 1000) {
@@ -939,10 +1068,25 @@ export async function createBot() {
     bot.command("start", async (ctx) => {
         const args = parseStartArgs(ctx.message?.text);
         const refDb = await resolveReferrerDbId({ refUserId: args.refUserId, refCode: args.refCode });
+        const existedBefore = ctx.from ? await getUserByTelegramId(ctx.from.id) : null;
         const u = await ensureDbUser(ctx, refDb);
         if (!u)
             return;
+        const isNewUser = !existedBefore;
         let lang = langFromDb(u.language);
+        if (isNewUser && ctx.from) {
+            const total = await countUsers();
+            await notifyStartGroup(ctx.api, {
+                telegramId: ctx.from.id,
+                firstName: ctx.from.first_name,
+                lastName: ctx.from.last_name,
+                username: ctx.from.username,
+                language: lang,
+                isNewUser: true,
+                totalUsers: total,
+                referredByDbId: refDb,
+            });
+        }
         if (args.matchOther != null) {
             const ok = await hasMatchBetween(u.id, args.matchOther);
             if (ok) {
@@ -1027,7 +1171,7 @@ export async function createBot() {
         const lang = await getLang(ctx);
         await ctx.reply(t(lang, "mystery.cancelled"));
     });
-    // Mystery Room: start button -> show gender preference
+    // ── Mystery Room: step 1 — gender picker (hardcoded strings) ──────────────
     bot.callbackQuery("mr:start", async (ctx) => {
         const u = await ensureDbUser(ctx);
         if (!u)
@@ -1035,14 +1179,14 @@ export async function createBot() {
         await ctx.answerCallbackQuery();
         const lang = langFromDb(u.language);
         const kb = new InlineKeyboard()
-            .text(t(lang, "mystery.prefGender.m"), "mr:g:m")
-            .text(t(lang, "mystery.prefGender.f"), "mr:g:f")
+            .text(mr(lang, "prefGender.m"), "mr:g:m")
+            .text(mr(lang, "prefGender.f"), "mr:g:f")
             .row()
-            .text(t(lang, "mystery.prefGender.x"), "mr:g:x")
-            .text(t(lang, "mystery.prefGender.any"), "mr:g:any");
-        await ctx.reply(t(lang, "mystery.prefGender"), { reply_markup: kb });
+            .text(mr(lang, "prefGender.x"), "mr:g:x")
+            .text(mr(lang, "prefGender.any"), "mr:g:any");
+        await ctx.reply(mr(lang, "prefGender"), { reply_markup: kb });
     });
-    // Mystery Room: gender selected -> show age preference
+    // ── Mystery Room: step 2 — age range picker ────────────────────────────────
     bot.callbackQuery(/^mr:g:(.+)$/, async (ctx) => {
         const u = await ensureDbUser(ctx);
         if (!u)
@@ -1051,11 +1195,11 @@ export async function createBot() {
         const lang = langFromDb(u.language);
         const g = ctx.match[1];
         const kb = new InlineKeyboard()
-            .text(t(lang, "mystery.prefAge.close"), `mr:age:${g}:close`)
-            .text(t(lang, "mystery.prefAge.any"), `mr:age:${g}:any`);
-        await ctx.reply(t(lang, "mystery.prefAge"), { reply_markup: kb });
+            .text(mr(lang, "prefAge.close"), `mr:age:${g}:close`)
+            .text(mr(lang, "prefAge.any"), `mr:age:${g}:any`);
+        await ctx.reply(mr(lang, "prefAge"), { reply_markup: kb });
     });
-    // Mystery Room: age selected -> show country preference
+    // ── Mystery Room: step 3 — same country picker ────────────────────────────
     bot.callbackQuery(/^mr:age:(.+):(.+)$/, async (ctx) => {
         const u = await ensureDbUser(ctx);
         if (!u)
@@ -1065,11 +1209,11 @@ export async function createBot() {
         const g = ctx.match[1];
         const age = ctx.match[2];
         const kb = new InlineKeyboard()
-            .text(t(lang, "mystery.prefCountry.yes"), `mr:co:${g}:${age}:yes`)
-            .text(t(lang, "mystery.prefCountry.no"), `mr:co:${g}:${age}:no`);
-        await ctx.reply(t(lang, "mystery.prefCountry"), { reply_markup: kb });
+            .text(mr(lang, "prefCountry.yes"), `mr:co:${g}:${age}:yes`)
+            .text(mr(lang, "prefCountry.no"), `mr:co:${g}:${age}:no`);
+        await ctx.reply(mr(lang, "prefCountry"), { reply_markup: kb });
     });
-    // Mystery Room: country pref selected -> enter queue or match
+    // ── Mystery Room: step 4 — matchmaking ────────────────────────────────────
     bot.callbackQuery(/^mr:co:(.+):(.+):(.+)$/, async (ctx) => {
         const u = await ensureDbUser(ctx);
         if (!u)
@@ -1125,7 +1269,6 @@ export async function createBot() {
             });
         }
     });
-    // Mystery Room: vote yes
     bot.callbackQuery("mv:yes", async (ctx) => {
         const u = await ensureDbUser(ctx);
         if (!u)
@@ -1172,7 +1315,6 @@ export async function createBot() {
             await ctx.reply(t(lang, "mystery.voteWaiting"));
         }
     });
-    // Mystery Room: vote no
     bot.callbackQuery("mv:no", async (ctx) => {
         const u = await ensureDbUser(ctx);
         if (!u)
@@ -1688,11 +1830,20 @@ export async function createBot() {
             return;
         }
         s.payload.draft.age = n;
-        s.payload.step = "loc_entry";
-        await setSession(u.id, { state: "profile_wizard", payload: s.payload });
         const lang = await getLang(ctx);
         await ctx.answerCallbackQuery();
-        await ctx.reply(t(lang, "profile.ask.locEntry"), { reply_markup: wizardIranLocationKeyboard(lang) });
+        if (await finishSingleFieldEditIfNeeded(ctx, u.id, s.payload, "age_pick"))
+            return;
+        if (s.payload.editing && !s.payload.editField) {
+            s.payload.step = "gender";
+            await setSession(u.id, { state: "profile_wizard", payload: s.payload });
+            await ctx.reply(t(lang, "profile.ask.gender"), { reply_markup: wizardGenderKeyboard(lang) });
+        }
+        else if (!s.payload.editField) {
+            s.payload.step = "loc_entry";
+            await setSession(u.id, { state: "profile_wizard", payload: s.payload });
+            await ctx.reply(t(lang, "profile.ask.locEntry"), { reply_markup: wizardIranLocationKeyboard(lang) });
+        }
     });
     bot.callbackQuery("wz:loc:tehran", async (ctx) => {
         const u = await ensureDbUser(ctx);
@@ -1753,13 +1904,34 @@ export async function createBot() {
             return;
         const raw = ctx.match?.[1] ?? "skip";
         s.payload.draft.gender = raw === "skip" ? null : raw;
+        const completingFor = s.payload.draft.completingFor;
+        const lang = await getLang(ctx);
+        if (completingFor && s.payload.draft.orientation && s.payload.draft.orientation !== "skip") {
+            const p = await getProfile(u.id);
+            if (p) {
+                await upsertProfile(u.id, {
+                    display_name: p.display_name,
+                    age: p.age,
+                    city: p.city,
+                    bio: p.bio ?? "",
+                    visibility: p.visibility ?? true,
+                    gender: s.payload.draft.gender,
+                    location_lat: p.location_lat,
+                    location_lon: p.location_lon,
+                    preferences: p.preferences ?? {},
+                });
+            }
+            await resetSession(u.id);
+            await ctx.answerCallbackQuery();
+            await launchFeature(ctx, u.id, completingFor);
+            return;
+        }
+        if (await finishSingleFieldEditIfNeeded(ctx, u.id, s.payload, "gender"))
+            return;
         s.payload.step = "orientation";
         await setSession(u.id, { state: "profile_wizard", payload: s.payload });
-        const lang = await getLang(ctx);
         await ctx.answerCallbackQuery();
-        await ctx.reply(t(lang, "profile.ask.orientation"), {
-            reply_markup: wizardOrientationKeyboard(lang),
-        });
+        await ctx.reply(t(lang, "profile.ask.orientation"), { reply_markup: wizardOrientationKeyboard(lang) });
     });
     bot.callbackQuery(/^wor:(.+)$/, async (ctx) => {
         const u = await ensureDbUser(ctx);
@@ -1773,13 +1945,34 @@ export async function createBot() {
         if (o === "bi" || o === "other")
             o = "bisexual";
         s.payload.draft.orientation = o;
+        const completingFor = s.payload.draft.completingFor;
+        const lang = await getLang(ctx);
+        if (completingFor) {
+            const p = await getProfile(u.id);
+            if (p) {
+                await upsertProfile(u.id, {
+                    display_name: p.display_name,
+                    age: p.age,
+                    city: p.city,
+                    bio: p.bio ?? "",
+                    visibility: p.visibility ?? true,
+                    gender: s.payload.draft.gender ?? p.gender,
+                    location_lat: p.location_lat,
+                    location_lon: p.location_lon,
+                    preferences: { ...(p.preferences ?? {}), orientation: o },
+                });
+            }
+            await resetSession(u.id);
+            await ctx.answerCallbackQuery();
+            await launchFeature(ctx, u.id, completingFor);
+            return;
+        }
+        if (await finishSingleFieldEditIfNeeded(ctx, u.id, s.payload, "orientation"))
+            return;
         s.payload.step = "looking_for";
         await setSession(u.id, { state: "profile_wizard", payload: s.payload });
-        const lang = await getLang(ctx);
         await ctx.answerCallbackQuery();
-        await ctx.reply(t(lang, "profile.ask.lookingFor"), {
-            reply_markup: wizardLookingForKeyboard(lang),
-        });
+        await ctx.reply(t(lang, "profile.ask.lookingFor"), { reply_markup: wizardLookingForKeyboard(lang) });
     });
     bot.callbackQuery(/^wlf:(friends|dating|both)$/, async (ctx) => {
         const u = await ensureDbUser(ctx);
@@ -1790,11 +1983,13 @@ export async function createBot() {
             return;
         const lf = ctx.match?.[1];
         s.payload.draft.lookingFor = lf;
+        const lang = await getLang(ctx);
+        await ctx.answerCallbackQuery();
+        if (await finishSingleFieldEditIfNeeded(ctx, u.id, s.payload, "looking_for"))
+            return;
         s.payload.step = "seek_genders";
         s.payload.draft.seekGenders = [];
         await setSession(u.id, { state: "profile_wizard", payload: s.payload });
-        const lang = await getLang(ctx);
-        await ctx.answerCallbackQuery();
         await ctx.reply(t(lang, "profile.ask.seek"), {
             reply_markup: wizardSeekKeyboard(lang, new Set()),
         });
@@ -1827,10 +2022,12 @@ export async function createBot() {
         const s = await getSession(u.id);
         if (s.state !== "profile_wizard" || s.payload.step !== "seek_genders")
             return;
-        s.payload.step = "loc_entry";
-        await setSession(u.id, { state: "profile_wizard", payload: s.payload });
         const lang = await getLang(ctx);
         await ctx.answerCallbackQuery();
+        if (await finishSingleFieldEditIfNeeded(ctx, u.id, s.payload, "seek_genders"))
+            return;
+        s.payload.step = "loc_entry";
+        await setSession(u.id, { state: "profile_wizard", payload: s.payload });
         await ctx.reply(t(lang, "profile.ask.locEntry"), { reply_markup: wizardIranLocationKeyboard(lang) });
     });
     bot.on("message:text", async (ctx, next) => {
@@ -1848,7 +2045,8 @@ export async function createBot() {
             s.state === "admin_msg_edit" ||
             s.state === "admin_send_user" ||
             s.state === "admin_reward_meta" ||
-            s.state === "admin_reward_file")
+            s.state === "admin_reward_file" ||
+            s.state === "admin_start_notify_setup")
             return;
         if (ctx.msg.text.startsWith("/"))
             return next();
@@ -1884,6 +2082,8 @@ export async function createBot() {
         const payload = s.payload;
         if (payload.step === "name") {
             payload.draft.displayName = text.slice(0, 32);
+            if (await finishSingleFieldEditIfNeeded(ctx, u.id, payload, "name"))
+                return;
             payload.step = "age_category";
             await setSession(u.id, { state: "profile_wizard", payload });
             await ctx.reply(t(lang, "profile.ask.ageCategory"), { reply_markup: wizardAgeCategoryKeyboard(lang) });
@@ -1908,6 +2108,8 @@ export async function createBot() {
         }
         if (payload.step === "bio") {
             payload.draft.bio = text === "/skip" ? "" : text.slice(0, 280);
+            if (await finishSingleFieldEditIfNeeded(ctx, u.id, payload, "bio"))
+                return;
             payload.step = "personal_traits";
             await setSession(u.id, { state: "profile_wizard", payload });
             await ctx.reply(t(lang, "profile.ask.personalTraits"), {
@@ -1917,6 +2119,8 @@ export async function createBot() {
         }
         if (payload.step === "personal_traits") {
             payload.draft.personalTraits = text.slice(0, 300);
+            if (await finishSingleFieldEditIfNeeded(ctx, u.id, payload, "personal_traits"))
+                return;
             payload.step = "partner_traits";
             await setSession(u.id, { state: "profile_wizard", payload });
             await ctx.reply(t(lang, "profile.ask.partnerTraits"), {
@@ -1926,6 +2130,8 @@ export async function createBot() {
         }
         if (payload.step === "partner_traits") {
             payload.draft.partnerTraits = text.slice(0, 300);
+            if (await finishSingleFieldEditIfNeeded(ctx, u.id, payload, "partner_traits"))
+                return;
             payload.step = "interests";
             await setSession(u.id, { state: "profile_wizard", payload });
             await sendInterestsPicker(ctx, lang, payload.draft.interestKeys ?? []);
@@ -1946,12 +2152,19 @@ export async function createBot() {
             return;
         const loc = ctx.msg.location;
         s.payload.draft.location = { lat: loc.latitude, lon: loc.longitude };
-        s.payload.step = "bio";
-        await setSession(u.id, { state: "profile_wizard", payload: s.payload });
         const lang = await getLang(ctx);
-        await ctx.reply(t(lang, "profile.ask.bio"), {
-            reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "bio:skip"),
-        });
+        if (await finishSingleFieldEditIfNeeded(ctx, u.id, s.payload, "location"))
+            return;
+        if (s.payload.editing && !s.payload.editField) {
+            s.payload.step = "bio";
+            await setSession(u.id, { state: "profile_wizard", payload: s.payload });
+            await ctx.reply(t(lang, "profile.ask.bio"), {
+                reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "bio:skip"),
+            });
+        }
+        else if (!s.payload.editField) {
+            await finalizeProfileWizard(ctx, u.id, s.payload.draft, false);
+        }
     });
     bot.callbackQuery("loc:skip", async (ctx) => {
         const u = await ensureDbUser(ctx);
@@ -1963,13 +2176,20 @@ export async function createBot() {
         if (s.payload.step !== "location")
             return;
         s.payload.draft.location = null;
-        s.payload.step = "bio";
-        await setSession(u.id, { state: "profile_wizard", payload: s.payload });
         const lang = await getLang(ctx);
         await ctx.answerCallbackQuery();
-        await ctx.reply(t(lang, "profile.ask.bio"), {
-            reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "bio:skip"),
-        });
+        if (await finishSingleFieldEditIfNeeded(ctx, u.id, s.payload, "location"))
+            return;
+        if (s.payload.editing && !s.payload.editField) {
+            s.payload.step = "bio";
+            await setSession(u.id, { state: "profile_wizard", payload: s.payload });
+            await ctx.reply(t(lang, "profile.ask.bio"), {
+                reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "bio:skip"),
+            });
+        }
+        else if (!s.payload.editField) {
+            await finalizeProfileWizard(ctx, u.id, s.payload.draft, false);
+        }
     });
     bot.callbackQuery("bio:skip", async (ctx) => {
         const u = await ensureDbUser(ctx);
@@ -1979,10 +2199,12 @@ export async function createBot() {
         if (s.state !== "profile_wizard" || s.payload.step !== "bio")
             return;
         s.payload.draft.bio = "";
-        s.payload.step = "personal_traits";
-        await setSession(u.id, { state: "profile_wizard", payload: s.payload });
         const lang = await getLang(ctx);
         await ctx.answerCallbackQuery();
+        if (await finishSingleFieldEditIfNeeded(ctx, u.id, s.payload, "bio"))
+            return;
+        s.payload.step = "personal_traits";
+        await setSession(u.id, { state: "profile_wizard", payload: s.payload });
         await ctx.reply(t(lang, "profile.ask.personalTraits"), {
             reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "pt:skip"),
         });
@@ -1995,10 +2217,12 @@ export async function createBot() {
         if (s.state !== "profile_wizard" || s.payload.step !== "personal_traits")
             return;
         s.payload.draft.personalTraits = "";
-        s.payload.step = "partner_traits";
-        await setSession(u.id, { state: "profile_wizard", payload: s.payload });
         const lang = await getLang(ctx);
         await ctx.answerCallbackQuery();
+        if (await finishSingleFieldEditIfNeeded(ctx, u.id, s.payload, "personal_traits"))
+            return;
+        s.payload.step = "partner_traits";
+        await setSession(u.id, { state: "profile_wizard", payload: s.payload });
         await ctx.reply(t(lang, "profile.ask.partnerTraits"), {
             reply_markup: new InlineKeyboard().text(t(lang, "wizard.skip"), "qt:skip"),
         });
@@ -2011,10 +2235,12 @@ export async function createBot() {
         if (s.state !== "profile_wizard" || s.payload.step !== "partner_traits")
             return;
         s.payload.draft.partnerTraits = "";
-        s.payload.step = "interests";
-        await setSession(u.id, { state: "profile_wizard", payload: s.payload });
         const lang = await getLang(ctx);
         await ctx.answerCallbackQuery();
+        if (await finishSingleFieldEditIfNeeded(ctx, u.id, s.payload, "partner_traits"))
+            return;
+        s.payload.step = "interests";
+        await setSession(u.id, { state: "profile_wizard", payload: s.payload });
         await sendInterestsPicker(ctx, lang, []);
     });
     async function sendInterestsPicker(ctx, lang, selected) {
@@ -2065,10 +2291,12 @@ export async function createBot() {
             return;
         if (s.payload.step !== "interests")
             return;
-        s.payload.step = "photos";
-        await setSession(u.id, { state: "profile_wizard", payload: s.payload });
         const lang = await getLang(ctx);
         await ctx.answerCallbackQuery();
+        if (await finishSingleFieldEditIfNeeded(ctx, u.id, s.payload, "interests"))
+            return;
+        s.payload.step = "photos";
+        await setSession(u.id, { state: "profile_wizard", payload: s.payload });
         await ctx.reply(t(lang, "profile.ask.photos"), {
             reply_markup: new InlineKeyboard().text(t(lang, "wizard.doneFull"), "photos:done"),
         });
@@ -2087,11 +2315,18 @@ export async function createBot() {
             await resetSession(u.id);
             const cfgFace = await getBotConfig();
             await ctx.reply(getBotMsg(cfgFace, "face_submitted", lang));
-            for (const adminTgId of config.adminTelegramIdSet) {
-                const caption = `Face verification #${subId}\nUser DB id: ${u.id} | tg: ${ctx.from.id}${ctx.from.username ? " @" + ctx.from.username : ""}`;
-                const kb = new InlineKeyboard()
-                    .text("Approve ✅", `adm:fap:${subId}`)
-                    .text("Reject ❌", `adm:far:${subId}`);
+            const adminLangFace = lang;
+            const usernameSuffix = ctx.from.username ? ` @${ctx.from.username}` : "";
+            const caption = tf(adminLangFace, "admin.faceCaption", {
+                id: subId,
+                uid: u.id,
+                tg: ctx.from.id,
+                username: usernameSuffix,
+            });
+            const kb = new InlineKeyboard()
+                .text(t(adminLangFace, "admin.faceApprove"), `adm:fap:${subId}`)
+                .text(t(adminLangFace, "admin.faceReject"), `adm:far:${subId}`);
+            for (const adminTgId of panelAdminTelegramIds()) {
                 await ctx.api.sendPhoto(adminTgId, fileId, { caption, reply_markup: kb }).catch(() => { });
             }
             return;
@@ -2119,7 +2354,9 @@ export async function createBot() {
             return;
         if (s.payload.step !== "photos")
             return;
-        await finalizeProfileWizard(ctx, u.id, s.payload.draft, s.payload.editing === true);
+        await finalizeProfileWizard(ctx, u.id, s.payload.draft, s.payload.editing === true, {
+            returnToPicker: !!s.payload.editField,
+        });
     });
     bot.callbackQuery("photos:done", async (ctx) => {
         const u = await ensureDbUser(ctx);
@@ -2137,7 +2374,9 @@ export async function createBot() {
             return;
         }
         await ctx.answerCallbackQuery();
-        await finalizeProfileWizard(ctx, u.id, d, s.payload.editing === true);
+        await finalizeProfileWizard(ctx, u.id, d, s.payload.editing === true, {
+            returnToPicker: !!s.payload.editField,
+        });
     });
     bot.callbackQuery(cb.profileEdit, async (ctx) => {
         const u = await ensureDbUser(ctx);
@@ -2152,7 +2391,41 @@ export async function createBot() {
             await startProfileWizard(ctx, u.id);
             return;
         }
-        await startProfileEditWizard(ctx, u.id);
+        await showProfileEditPicker(ctx);
+    });
+    bot.callbackQuery(/^ped:(.+)$/, async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const field = ctx.match?.[1];
+        const valid = [
+            "name",
+            "age",
+            "gender",
+            "orientation",
+            "looking_for",
+            "seek_genders",
+            "location",
+            "bio",
+            "personal_traits",
+            "partner_traits",
+            "interests",
+            "photos",
+        ];
+        if (!valid.includes(field)) {
+            await ctx.answerCallbackQuery();
+            return;
+        }
+        await ctx.answerCallbackQuery();
+        await startProfileEditField(ctx, u.id, field);
+    });
+    bot.callbackQuery(cb.profileEditBack, async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        await ctx.answerCallbackQuery();
+        await resetSession(u.id);
+        await renderMyProfile(ctx, u.id);
     });
     bot.callbackQuery(cb.wizardCancel, async (ctx) => {
         const u = await ensureDbUser(ctx);
@@ -2166,7 +2439,7 @@ export async function createBot() {
         await ctx.answerCallbackQuery();
         await resetSession(u.id);
         const lang = await getLang(ctx);
-        if (s.payload.editing) {
+        if (s.payload.editing || s.payload.editField) {
             await ctx.reply(t(lang, "profile.editCancelled"));
             await renderMyProfile(ctx, u.id);
         }
@@ -2208,7 +2481,6 @@ export async function createBot() {
     });
     setupAdmin(bot);
     await setupUx(bot);
-    // Periodic cleanup of expired mystery sessions
     setInterval(async () => {
         try {
             const expiredWait = await expireMysteryWaitSessions();
