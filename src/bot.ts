@@ -3,7 +3,8 @@ import { setupAdmin, tryHandleAdminFollowupMessage } from "./admin/panel.js";
 import { ensureBotConfigSeeded, getBotConfig, getBotMsg, labelForLang } from "./config/botContent.js";
 import type { HomeMenuAction } from "./config/botContent.js";
 import { config } from "./config.js";
-import { notifyStartGroup } from "./features/startNotify.js";
+import { isPanelAdmin, refreshPanelAdminCache } from "./config/access.js";
+import { getStartNotifyGroupRef, normalizePublicHandle, notifyStartGroup } from "./features/startNotify.js";
 import { formatDiscoverCaption, explorerMarkup, registerExplorerCallbacks } from "./features/explorer.js";
 import { buildCodeHomeReplyKeyboard, matchCodeHomeAction } from "./config/homeMenu.js";
 import { IRAN_COUNTRY_EN, provinceLabel } from "./config/iranGeo.js";
@@ -81,7 +82,9 @@ import {
   swipe,
   upsertProfile,
   upsertUser,
+  getSystemSettingBool,
   getSystemSettingNumber,
+  getSystemSettingJson,
 } from "./db/repo.js";
 
 // ── Hardcoded mystery-room strings (no i18n file edits needed) ──────────────
@@ -113,6 +116,41 @@ async function getLang(ctx: MyContext): Promise<Language> {
   if (!tgId) return "en";
   const u = await getUserByTelegramId(tgId);
   return langFromDb(u?.language ?? "en");
+}
+
+async function isBotEnabled(): Promise<boolean> {
+  return getSystemSettingBool("bot_enabled", true);
+}
+
+function isTelegramMembershipStatusOk(status: string | undefined): boolean {
+  return status === "member" || status === "administrator" || status === "creator";
+}
+
+async function getRequiredJoinHandles(): Promise<string[]> {
+  const raw = await getSystemSettingJson<unknown>("must_join_channels", []);
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((v) => normalizePublicHandle(String(v ?? "")))
+    .filter((v): v is string => !!v);
+}
+
+async function ensureJoinLocks(ctx: MyContext, lang: Language): Promise<boolean> {
+  if (!ctx.from || isPanelAdmin(ctx.from.id)) return true;
+  const handles = await getRequiredJoinHandles();
+  if (handles.length === 0) return true;
+  const missing: string[] = [];
+  for (const handle of handles) {
+    try {
+      const member = await ctx.api.getChatMember(handle, ctx.from.id);
+      if (!isTelegramMembershipStatusOk(member.status)) missing.push(handle);
+    } catch {
+      missing.push(handle);
+    }
+  }
+  if (missing.length === 0) return true;
+  const key = lang === "fa" ? "join.required" : "join.required";
+  await ctx.reply(tf(lang, key, { channels: missing.join("\n") }));
+  return false;
 }
 
 function parseStartArgs(text: string | undefined): {
@@ -957,6 +995,7 @@ async function deliverReferralRewardsForReferrer(ctx: MyContext, referrerUserId:
 
 export async function createBot() {
   await ensureBotConfigSeeded();
+  await refreshPanelAdminCache();
   const bot = new Bot<MyContext>(config.BOT_TOKEN);
 
   bot.api.config.use(async (prev, method, payload, signal) => {
@@ -983,10 +1022,30 @@ export async function createBot() {
     if (ctx.chat?.type !== "private") return next();
     const tg = ctx.from?.id;
     if (!tg) return next();
+    if (!(await isBotEnabled()) && !isPanelAdmin(tg)) {
+      const lang = ctx.from?.language_code?.startsWith("fa") ? "fa" : "en";
+      await ctx.reply(t(lang, "bot.disabled"));
+      return;
+    }
     const u = await getUserByTelegramId(tg);
     if (u?.is_banned) {
       const lang = ctx.from?.language_code?.startsWith("fa") ? "fa" : "en";
       await ctx.reply(t(lang, "settings.banned"));
+      return;
+    }
+    return next();
+  });
+
+  bot.use(async (ctx, next) => {
+    if (ctx.chat?.type !== "private" || !ctx.from) return next();
+    if (isPanelAdmin(ctx.from.id)) return next();
+    const text = ctx.message?.text?.trim();
+    if (text?.startsWith("/start")) return next();
+    const u = await getUserByTelegramId(ctx.from.id);
+    const lang = langFromDb(u?.language ?? (ctx.from.language_code?.startsWith("fa") ? "fa" : "en"));
+    const ok = await ensureJoinLocks(ctx, lang);
+    if (!ok) {
+      if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => {});
       return;
     }
     return next();
@@ -1019,7 +1078,7 @@ export async function createBot() {
   });
 
   bot.use(async (ctx, next) => {
-    if (!ctx.from || !config.adminTelegramIdSet.has(ctx.from.id)) return next();
+    if (!ctx.from || !isPanelAdmin(ctx.from.id)) return next();
     if (!ctx.message) return next();
     const u = await getUserByTelegramId(ctx.from.id);
     if (!u) return next();
@@ -1088,7 +1147,16 @@ export async function createBot() {
       const userKb = new InlineKeyboard()
         .text(t(lang, "admin.resetNopes"), `adm:rnopes:${target.id}`)
         .row()
-        .text(t(lang, target.is_banned ? "admin.unban" : "admin.ban"), `adm:usrban:${target.id}:${target.is_banned ? 0 : 1}`);
+        .text(t(lang, target.is_banned ? "admin.unban" : "admin.ban"), `adm:usrban:${target.id}:${target.is_banned ? 0 : 1}`)
+        .row()
+        .text(
+          t(lang, target.badge_verified ? "admin.badgeVerifiedOff" : "admin.badgeVerifiedOn"),
+          `adm:ubv:${target.id}:${target.badge_verified ? 0 : 1}`
+        )
+        .text(
+          t(lang, target.badge_vip ? "admin.badgeVipOff" : "admin.badgeVipOn"),
+          `adm:ubp:${target.id}:${target.badge_vip ? 0 : 1}`
+        );
       await ctx.reply(
         tf(lang, "admin.userLine", {
           id: target.id,
@@ -1123,6 +1191,10 @@ export async function createBot() {
       s.state === "admin_diamond_wait" ||
       s.state === "admin_msg_edit" ||
       s.state === "admin_send_user" ||
+      s.state === "admin_referral_setting_wait" ||
+      s.state === "admin_join_lock_add" ||
+      s.state === "admin_admin_add" ||
+      s.state === "admin_admin_remove" ||
       s.state === "admin_reward_meta" ||
       s.state === "admin_reward_file"
     )
@@ -1196,6 +1268,8 @@ export async function createBot() {
     const isNewUser = !existedBefore;
     let lang = langFromDb(u.language);
 
+    if (!(await ensureJoinLocks(ctx, lang))) return;
+
     if (isNewUser && ctx.from) {
       const total = await countUsers();
       await notifyStartGroup(ctx.api, {
@@ -1234,18 +1308,24 @@ export async function createBot() {
   bot.command("profile", async (ctx) => {
     const u = await ensureDbUser(ctx);
     if (!u) return;
+    const lang = langFromDb(u.language);
+    if (!(await ensureJoinLocks(ctx, lang))) return;
     await renderMyProfile(ctx, u.id);
   });
 
   bot.command("discover", async (ctx) => {
     const u = await ensureDbUser(ctx);
     if (!u) return;
+    const lang = langFromDb(u.language);
+    if (!(await ensureJoinLocks(ctx, lang))) return;
     await discoverStart(ctx, u.id);
   });
 
   bot.command("matches", async (ctx) => {
     const u = await ensureDbUser(ctx);
     if (!u) return;
+    const lang = langFromDb(u.language);
+    if (!(await ensureJoinLocks(ctx, lang))) return;
     await showMatches(ctx, u.id);
   });
 
@@ -1464,6 +1544,10 @@ export async function createBot() {
       s.state === "admin_diamond_wait" ||
       s.state === "admin_msg_edit" ||
       s.state === "admin_send_user" ||
+      s.state === "admin_referral_setting_wait" ||
+      s.state === "admin_join_lock_add" ||
+      s.state === "admin_admin_add" ||
+      s.state === "admin_admin_remove" ||
       s.state === "admin_reward_meta" ||
       s.state === "admin_reward_file"
     ) {
@@ -2115,6 +2199,10 @@ export async function createBot() {
       s.state === "admin_diamond_wait" ||
       s.state === "admin_msg_edit" ||
       s.state === "admin_send_user" ||
+      s.state === "admin_referral_setting_wait" ||
+      s.state === "admin_join_lock_add" ||
+      s.state === "admin_admin_add" ||
+      s.state === "admin_admin_remove" ||
       s.state === "admin_reward_meta" ||
       s.state === "admin_reward_file" ||
       s.state === "admin_start_notify_setup"

@@ -805,6 +805,20 @@ export async function getSystemSettingNumber(key: string, defaultVal: number): P
   return defaultVal;
 }
 
+export async function getSystemSettingString(key: string, defaultVal: string): Promise<string> {
+  const res = await query<{ value_json: unknown }>(`SELECT value_json FROM system_settings WHERE key = $1`, [key]);
+  const v = res.rows[0]?.value_json;
+  if (typeof v === "string") return v;
+  if (v == null) return defaultVal;
+  return String(v);
+}
+
+export async function getSystemSettingJson<T>(key: string, defaultVal: T): Promise<T> {
+  const res = await query<{ value_json: unknown }>(`SELECT value_json FROM system_settings WHERE key = $1`, [key]);
+  const v = res.rows[0]?.value_json;
+  return (v as T | undefined) ?? defaultVal;
+}
+
 export async function setSystemSetting(key: string, value: unknown) {
   await query(
     `INSERT INTO system_settings (key, value_json) VALUES ($1, $2::jsonb)
@@ -849,16 +863,21 @@ export async function pruneMessageLogs() {
 export type MessageLogRow = {
   id: string;
   direction: string;
+  user_id: string | null;
   telegram_user_id: string;
+  chat_id: string;
+  message_id: string | null;
   text_preview: string;
   update_type: string;
+  payload: unknown;
   created_at: string;
 };
 
 export async function listMessageLogs(limit: number, offset: number): Promise<MessageLogRow[]> {
   const res = await query<MessageLogRow>(
     `
-    SELECT id::text, direction, telegram_user_id::text, text_preview, update_type, created_at::text
+    SELECT id::text, direction, user_id::text, telegram_user_id::text, chat_id::text,
+           message_id::text, text_preview, update_type, payload, created_at::text
     FROM message_logs
     ORDER BY created_at DESC
     LIMIT $1 OFFSET $2
@@ -866,6 +885,17 @@ export async function listMessageLogs(limit: number, offset: number): Promise<Me
     [limit, offset]
   );
   return res.rows;
+}
+
+export async function getMessageLogById(id: number): Promise<MessageLogRow | null> {
+  const res = await query<MessageLogRow>(
+    `SELECT id::text, direction, user_id::text, telegram_user_id::text, chat_id::text,
+            message_id::text, text_preview, update_type, payload, created_at::text
+     FROM message_logs
+     WHERE id = $1`,
+    [id]
+  );
+  return res.rows[0] ?? null;
 }
 
 export async function purgeAllMessageLogs() {
@@ -1160,6 +1190,26 @@ export async function insertReferralFileReward(params: {
 
 export async function deleteReferralFileReward(id: number) {
   await query(`DELETE FROM referral_file_rewards WHERE id = $1`, [id]);
+}
+
+export async function updateUserBadges(params: {
+  userId: number;
+  verified?: boolean;
+  vip?: boolean;
+}) {
+  const cur = await getUserById(params.userId);
+  if (!cur) return;
+  await query(
+    `UPDATE users
+     SET badge_verified = $2,
+         badge_vip = $3
+     WHERE id = $1`,
+    [
+      params.userId,
+      typeof params.verified === "boolean" ? params.verified : cur.badge_verified,
+      typeof params.vip === "boolean" ? params.vip : cur.badge_vip,
+    ]
+  );
 }
 
 export async function listUnclaimedReferralFileRewardsForUser(userId: number): Promise<ReferralFileRewardRow[]> {

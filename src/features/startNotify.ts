@@ -1,11 +1,21 @@
-import type { Api, Context } from "grammy";
-import { countUsers, getSystemSettingBool, getSystemSettingNumber } from "../db/repo.js";
+import type { Api } from "grammy";
+import { getSystemSettingBool, getSystemSettingNumber, getSystemSettingString } from "../db/repo.js";
 import { tf } from "../i18n/index.js";
 import type { Language } from "../types.js";
 
-export async function getStartNotifyGroupId(): Promise<number | null> {
-  const id = await getSystemSettingNumber("start_notify_group_id", 0);
-  return id !== 0 ? id : null;
+export function normalizePublicHandle(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const handle = trimmed.startsWith("@") ? trimmed : `@${trimmed}`;
+  if (!/^@[A-Za-z0-9_]{4,}$/.test(handle)) return null;
+  return handle;
+}
+
+export async function getStartNotifyGroupRef(): Promise<string | null> {
+  const handle = (await getSystemSettingString("start_notify_group_ref", "")).trim();
+  if (handle) return handle;
+  const legacyId = await getSystemSettingNumber("start_notify_group_id", 0);
+  return legacyId !== 0 ? String(legacyId) : null;
 }
 
 export async function isStartNotifyEnabled(): Promise<boolean> {
@@ -27,8 +37,8 @@ export async function notifyStartGroup(
 ): Promise<void> {
   if (!params.isNewUser) return;
   const enabled = await isStartNotifyEnabled();
-  const groupId = await getStartNotifyGroupId();
-  if (!enabled || groupId == null) return;
+  const groupRef = await getStartNotifyGroupRef();
+  if (!enabled || !groupRef) return;
 
   const displayName = [params.firstName, params.lastName].filter(Boolean).join(" ").trim() || "—";
   const text = tf("fa", "admin.startNotifyBody", {
@@ -40,27 +50,5 @@ export async function notifyStartGroup(
     referred: params.referredByDbId != null ? String(params.referredByDbId) : "—",
   });
 
-  await api.sendMessage(groupId, text).catch(() => {});
-}
-
-export async function extractForwardedGroupId(ctx: Context): Promise<number | null> {
-  const msg = ctx.message;
-  if (!msg) return null;
-  if (msg.forward_origin?.type === "chat") {
-    const chat = msg.forward_origin.sender_chat;
-    if (chat.type === "group" || chat.type === "supergroup") return chat.id;
-  }
-  const legacy = (msg as { forward_from_chat?: { id: number; type: string } }).forward_from_chat;
-  if (legacy && (legacy.type === "group" || legacy.type === "supergroup")) {
-    return legacy.id;
-  }
-  return null;
-}
-
-export function forwardedGroupTitle(ctx: Context): string {
-  const msg = ctx.message;
-  if (!msg) return "—";
-  if (msg.forward_origin?.type === "chat") return msg.forward_origin.sender_chat.title ?? "—";
-  const legacy = (msg as { forward_from_chat?: { title?: string } }).forward_from_chat;
-  return legacy?.title ?? "—";
+  await api.sendMessage(groupRef, text).catch(() => {});
 }

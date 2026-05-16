@@ -18,7 +18,11 @@ export type SessionState =
   | { state: "admin_send_user"; payload: { step: "await_telegram" | "await_text"; targetTelegram?: number } }
   | { state: "admin_reward_meta"; payload: Record<string, unknown> }
   | { state: "admin_reward_file"; payload: { minReferrals: number; captionFa: string; captionEn: string } }
-  | { state: "admin_start_notify_setup"; payload: Record<string, unknown> };
+  | { state: "admin_start_notify_setup"; payload: Record<string, unknown> }
+  | { state: "admin_referral_setting_wait"; payload: { key: string } }
+  | { state: "admin_join_lock_add"; payload: Record<string, unknown> }
+  | { state: "admin_admin_add"; payload: Record<string, unknown> }
+  | { state: "admin_admin_remove"; payload: Record<string, unknown> };
 
 export type ProfileWizardStep =
   | "name"

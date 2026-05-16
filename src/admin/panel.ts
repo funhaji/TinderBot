@@ -10,13 +10,17 @@ import {
   setBotConfigDocument,
 } from "../config/botContent.js";
 import type { BotMessageKey } from "../config/botContent.js";
-import { isPanelAdmin } from "../config/access.js";
+import {
+  addPanelAdminId,
+  isPanelAdmin,
+  listDynamicPanelAdminIds,
+  removePanelAdminId,
+} from "../config/access.js";
 import { resolveAdminLang } from "./lang.js";
 import {
-  extractForwardedGroupId,
-  forwardedGroupTitle,
-  getStartNotifyGroupId,
+  getStartNotifyGroupRef,
   isStartNotifyEnabled,
+  normalizePublicHandle,
 } from "../features/startNotify.js";
 import { logger } from "../logger.js";
 import type { Language, MyContext, SessionState } from "../types.js";
@@ -35,6 +39,7 @@ import {
   getUserById,
   getTelegramIdByUserId,
   listMessageLogs,
+  getMessageLogById,
   listOpenReports,
   listReferralFileRewards,
   insertReferralFileReward,
@@ -44,7 +49,11 @@ import {
   setProfileVisibility,
   setSession,
   getSystemSettingBool,
+  getSystemSettingJson,
+  getSystemSettingNumber,
+  getSystemSettingString,
   setSystemSetting,
+  updateUserBadges,
 } from "../db/repo.js";
 
 const REP_PAGE = 5;
@@ -70,6 +79,7 @@ const adm = {
   find: "adm:fn",
   logs: "adm:logs",
   logsPage: (page: number) => `adm:logs:${page}`,
+  logView: (id: number) => `adm:logv:${id}`,
   logToggle: "adm:logtog",
   logPurge: "adm:logpurge",
   logPurgeY: "adm:logpy",
@@ -91,6 +101,17 @@ const adm = {
   rewardNew: "adm:rw",
   rewardList: "adm:rwl",
   rewardDelete: (id: number) => `adm:rwd:${id}`,
+  referralCfg: "adm:rwc",
+  referralSet: (key: string) => `adm:rws:${key}`,
+  admins: "adm:admins",
+  adminAdd: "adm:admins:add",
+  adminRemove: "adm:admins:remove",
+  botToggle: "adm:bot:toggle",
+  joins: "adm:joins",
+  joinAdd: "adm:joins:add",
+  joinClear: "adm:joins:clear",
+  userBadgeVerified: (userId: number, enabled: 0 | 1) => `adm:ubv:${userId}:${enabled}`,
+  userBadgeVip: (userId: number, enabled: 0 | 1) => `adm:ubp:${userId}:${enabled}`,
   startNotify: "adm:sn",
   startNotifyToggle: "adm:snt",
   startNotifySet: "adm:sns",
@@ -155,6 +176,38 @@ function formatDistribution(
   return rows.map((row) => `${labeler(lang, row.key)}: ${row.c}`).join("\n");
 }
 
+const REFERRAL_SETTING_KEYS = [
+  "diamond_reward_profile",
+  "diamond_reward_referral",
+  "referral_vip_threshold",
+  "referral_badge_verify_threshold",
+] as const;
+
+type ReferralSettingKey = (typeof REFERRAL_SETTING_KEYS)[number];
+
+async function referralSettingsText(lang: Language): Promise<string> {
+  const [profileReward, referralReward, vipThreshold, verifyThreshold] = await Promise.all([
+    getSystemSettingNumber("diamond_reward_profile", 10),
+    getSystemSettingNumber("diamond_reward_referral", 5),
+    getSystemSettingNumber("referral_vip_threshold", 10),
+    getSystemSettingNumber("referral_badge_verify_threshold", 10),
+  ]);
+  return tf(lang, "admin.referralConfigCurrent", {
+    profileReward,
+    referralReward,
+    vipThreshold,
+    verifyThreshold,
+  });
+}
+
+async function joinLocksText(lang: Language): Promise<string> {
+  const raw = await getSystemSettingJson<unknown>("must_join_channels", []);
+  const items = Array.isArray(raw) ? raw.map((v) => String(v)).filter(Boolean) : [];
+  return tf(lang, "admin.joinLocksCurrent", {
+    channels: items.length ? items.join("\n") : "—",
+  });
+}
+
 export function adminRootKb(lang: Language) {
   return new InlineKeyboard()
     .text(t(lang, "admin.stats"), adm.stats)
@@ -183,6 +236,12 @@ export function adminRootKb(lang: Language) {
     .text(t(lang, "admin.referralRewards"), adm.rewardNew)
     .row()
     .text(t(lang, "admin.rewardList"), adm.rewardList)
+    .text(t(lang, "admin.referralConfig"), adm.referralCfg)
+    .row()
+    .text(t(lang, "admin.admins"), adm.admins)
+    .text(t(lang, "admin.joinLocks"), adm.joins)
+    .row()
+    .text(t(lang, "admin.botToggle"), adm.botToggle)
     .row()
     .text(t(lang, "admin.startNotify"), adm.startNotify);
 }
@@ -379,16 +438,16 @@ export async function tryHandleAdminFollowupMessage(
       await ctx.reply(t(lang, "admin.broadcastCancelled"));
       return true;
     }
-    const groupId = await extractForwardedGroupId(ctx);
-    if (groupId == null) {
+    const groupRef = normalizePublicHandle(txt);
+    if (!groupRef) {
       await ctx.reply(t(lang, "admin.startNotifySetPrompt"));
       return true;
     }
-    await setSystemSetting("start_notify_group_id", groupId);
+    await setSystemSetting("start_notify_group_ref", groupRef);
     await setSystemSetting("start_notify_enabled", true);
     await setSession(u.id, { state: "idle", payload: {} });
-    const title = forwardedGroupTitle(ctx);
-    await ctx.reply(tf(lang, "admin.startNotifySetDone", { title, id: groupId }));
+    await ctx.reply(tf(lang, "admin.startNotifySetDone", { title: groupRef, id: groupRef }));
+    await ctx.reply(t(lang, "admin.startNotifyBotAdminHint"));
     return true;
   }
 
@@ -415,6 +474,63 @@ export async function tryHandleAdminFollowupMessage(
       payload: { minReferrals: minRef, captionFa: cap[0]!, captionEn: cap[1]! },
     });
     await ctx.reply(t(lang, "admin.rewardPromptFile"));
+    return true;
+  }
+
+  if (s.state === "admin_referral_setting_wait") {
+    if (txt === "/cancel") {
+      await setSession(u.id, { state: "idle", payload: {} });
+      await ctx.reply(t(lang, "admin.broadcastCancelled"));
+      return true;
+    }
+    const key = (s.payload as { key?: string }).key as ReferralSettingKey | undefined;
+    const value = Number(txt);
+    if (!key || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+      await ctx.reply(t(lang, "admin.referralSettingPrompt"));
+      return true;
+    }
+    await setSystemSetting(key, value);
+    await setSession(u.id, { state: "idle", payload: {} });
+    await ctx.reply(t(lang, "admin.cfgSaved"));
+    return true;
+  }
+
+  if (s.state === "admin_join_lock_add") {
+    if (txt === "/cancel") {
+      await setSession(u.id, { state: "idle", payload: {} });
+      await ctx.reply(t(lang, "admin.broadcastCancelled"));
+      return true;
+    }
+    const handle = normalizePublicHandle(txt);
+    if (!handle) {
+      await ctx.reply(t(lang, "admin.joinLocksPrompt"));
+      return true;
+    }
+    const current = await getSystemSettingJson<unknown>("must_join_channels", []);
+    const next = new Set(Array.isArray(current) ? current.map((v) => String(v)) : []);
+    next.add(handle);
+    await setSystemSetting("must_join_channels", Array.from(next));
+    await setSession(u.id, { state: "idle", payload: {} });
+    await ctx.reply(await joinLocksText(lang));
+    return true;
+  }
+
+  if (s.state === "admin_admin_add" || s.state === "admin_admin_remove") {
+    if (txt === "/cancel") {
+      await setSession(u.id, { state: "idle", payload: {} });
+      await ctx.reply(t(lang, "admin.broadcastCancelled"));
+      return true;
+    }
+    const tgId = Number(txt);
+    if (!Number.isFinite(tgId) || !Number.isInteger(tgId) || tgId <= 0) {
+      await ctx.reply(t(lang, "admin.findInvalid"));
+      return true;
+    }
+    if (s.state === "admin_admin_add") await addPanelAdminId(tgId);
+    else await removePanelAdminId(tgId);
+    await setSession(u.id, { state: "idle", payload: {} });
+    const ids = await listDynamicPanelAdminIds();
+    await ctx.reply(tf(lang, "admin.adminListBody", { ids: ids.length ? ids.join(", ") : "—" }));
     return true;
   }
 
@@ -585,11 +701,12 @@ export function setupAdmin(bot: Bot<MyContext>) {
     const rows = await listMessageLogs(LOG_PAGE, 0);
     const lines = rows.length
       ? rows
-          .map((r) => `${r.created_at.slice(0, 19)} [${r.direction}] tg:${r.telegram_user_id} ${r.update_type} ${r.text_preview.slice(0, 60)}`)
+          .map((r) => `#${r.id} ${r.created_at.slice(0, 19)} [${r.direction}] tg:${r.telegram_user_id} ${r.update_type} ${r.text_preview.slice(0, 45)}`)
           .join("\n")
       : t(lang, "admin.logsEmpty");
     const nextRows = rows.length === LOG_PAGE ? await listMessageLogs(1, LOG_PAGE) : [];
     const kb = new InlineKeyboard();
+    for (const row of rows.slice(0, 6)) kb.text(`#${row.id}`, adm.logView(Number(row.id))).row();
     if (nextRows.length > 0) kb.text("»", adm.logsPage(1)).row();
     kb.text(t(lang, "admin.back"), adm.root);
     await ctx.editMessageText(lines.slice(0, 3500), {
@@ -605,11 +722,12 @@ export function setupAdmin(bot: Bot<MyContext>) {
     const rows = await listMessageLogs(LOG_PAGE, page * LOG_PAGE);
     const lines = rows.length
       ? rows
-          .map((r) => `${r.created_at.slice(0, 19)} [${r.direction}] tg:${r.telegram_user_id} ${r.update_type} ${r.text_preview.slice(0, 60)}`)
+          .map((r) => `#${r.id} ${r.created_at.slice(0, 19)} [${r.direction}] tg:${r.telegram_user_id} ${r.update_type} ${r.text_preview.slice(0, 45)}`)
           .join("\n")
       : t(lang, "admin.logsEmpty");
     const nextRows = rows.length === LOG_PAGE ? await listMessageLogs(1, (page + 1) * LOG_PAGE) : [];
     const kb = new InlineKeyboard();
+    for (const row of rows.slice(0, 6)) kb.text(`#${row.id}`, adm.logView(Number(row.id))).row();
     if (page > 0) kb.text("«", adm.logsPage(page - 1));
     if (nextRows.length > 0) kb.text("»", adm.logsPage(page + 1));
     if (page > 0 || nextRows.length > 0) kb.row();
@@ -617,6 +735,32 @@ export function setupAdmin(bot: Bot<MyContext>) {
     await ctx.editMessageText(lines.slice(0, 3500), {
       reply_markup: kb,
     });
+  });
+
+  bot.callbackQuery(/^adm:logv:(\d+)$/, async (ctx) => {
+    if (!isPanelAdmin(ctx.from?.id)) return;
+    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+    const id = Number(ctx.match?.[1] ?? 0);
+    await ctx.answerCallbackQuery();
+    const row = await getMessageLogById(id);
+    if (!row) {
+      await ctx.reply(t(lang, "admin.logsEmpty"));
+      return;
+    }
+    await ctx.reply(
+      tf(lang, "admin.logDetail", {
+        id: row.id,
+        createdAt: row.created_at,
+        direction: row.direction,
+        telegramId: row.telegram_user_id,
+        chatId: row.chat_id,
+        messageId: row.message_id ?? "—",
+        updateType: row.update_type,
+        preview: row.text_preview || "—",
+        payload: JSON.stringify(row.payload ?? {}, null, 2).slice(0, 1200),
+      }),
+      { reply_markup: new InlineKeyboard().text(t(lang, "admin.back"), adm.logs) }
+    );
   });
 
   bot.callbackQuery(adm.logToggle, async (ctx) => {
@@ -846,12 +990,119 @@ export function setupAdmin(bot: Bot<MyContext>) {
     await ctx.reply(tf(lang, "admin.rewardDeleted", { id }));
   });
 
+  bot.callbackQuery(adm.referralCfg, async (ctx) => {
+    if (!isPanelAdmin(ctx.from?.id)) return;
+    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageText(await referralSettingsText(lang), {
+      reply_markup: new InlineKeyboard()
+        .text(t(lang, "admin.referralProfileReward"), adm.referralSet("diamond_reward_profile"))
+        .text(t(lang, "admin.referralReferralReward"), adm.referralSet("diamond_reward_referral"))
+        .row()
+        .text(t(lang, "admin.referralVipThreshold"), adm.referralSet("referral_vip_threshold"))
+        .text(t(lang, "admin.referralVerifyThreshold"), adm.referralSet("referral_badge_verify_threshold"))
+        .row()
+        .text(t(lang, "admin.back"), adm.root),
+    });
+  });
+
+  bot.callbackQuery(/^adm:rws:(.+)$/, async (ctx) => {
+    if (!isPanelAdmin(ctx.from?.id)) return;
+    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+    const key = String(ctx.match?.[1] ?? "");
+    if (!REFERRAL_SETTING_KEYS.includes(key as ReferralSettingKey)) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+    await ctx.answerCallbackQuery();
+    const u = await getUserByTelegramId(ctx.from!.id);
+    if (!u) return;
+    await setSession(u.id, { state: "admin_referral_setting_wait", payload: { key } });
+    await ctx.reply(t(lang, "admin.referralSettingPrompt"));
+  });
+
+  bot.callbackQuery(adm.admins, async (ctx) => {
+    if (!isPanelAdmin(ctx.from?.id)) return;
+    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+    await ctx.answerCallbackQuery();
+    const ids = await listDynamicPanelAdminIds();
+    await ctx.editMessageText(tf(lang, "admin.adminListBody", { ids: ids.length ? ids.join(", ") : "—" }), {
+      reply_markup: new InlineKeyboard()
+        .text(t(lang, "admin.adminAdd"), adm.adminAdd)
+        .text(t(lang, "admin.adminRemove"), adm.adminRemove)
+        .row()
+        .text(t(lang, "admin.back"), adm.root),
+    });
+  });
+
+  bot.callbackQuery(adm.adminAdd, async (ctx) => {
+    if (!isPanelAdmin(ctx.from?.id)) return;
+    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+    await ctx.answerCallbackQuery();
+    const u = await getUserByTelegramId(ctx.from!.id);
+    if (!u) return;
+    await setSession(u.id, { state: "admin_admin_add", payload: {} });
+    await ctx.reply(t(lang, "admin.adminPrompt"));
+  });
+
+  bot.callbackQuery(adm.adminRemove, async (ctx) => {
+    if (!isPanelAdmin(ctx.from?.id)) return;
+    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+    await ctx.answerCallbackQuery();
+    const u = await getUserByTelegramId(ctx.from!.id);
+    if (!u) return;
+    await setSession(u.id, { state: "admin_admin_remove", payload: {} });
+    await ctx.reply(t(lang, "admin.adminPrompt"));
+  });
+
+  bot.callbackQuery(adm.botToggle, async (ctx) => {
+    if (!isPanelAdmin(ctx.from?.id)) return;
+    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+    const cur = await getSystemSettingBool("bot_enabled", true);
+    await setSystemSetting("bot_enabled", !cur);
+    await ctx.answerCallbackQuery({
+      text: !cur ? t(lang, "admin.botEnabled") : t(lang, "admin.botDisabled"),
+      show_alert: false,
+    });
+  });
+
+  bot.callbackQuery(adm.joins, async (ctx) => {
+    if (!isPanelAdmin(ctx.from?.id)) return;
+    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageText(await joinLocksText(lang), {
+      reply_markup: new InlineKeyboard()
+        .text(t(lang, "admin.joinLocksAdd"), adm.joinAdd)
+        .text(t(lang, "admin.joinLocksClear"), adm.joinClear)
+        .row()
+        .text(t(lang, "admin.back"), adm.root),
+    });
+  });
+
+  bot.callbackQuery(adm.joinAdd, async (ctx) => {
+    if (!isPanelAdmin(ctx.from?.id)) return;
+    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+    await ctx.answerCallbackQuery();
+    const u = await getUserByTelegramId(ctx.from!.id);
+    if (!u) return;
+    await setSession(u.id, { state: "admin_join_lock_add", payload: {} });
+    await ctx.reply(t(lang, "admin.joinLocksPrompt"));
+  });
+
+  bot.callbackQuery(adm.joinClear, async (ctx) => {
+    if (!isPanelAdmin(ctx.from?.id)) return;
+    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+    await ctx.answerCallbackQuery();
+    await setSystemSetting("must_join_channels", []);
+    await ctx.reply(await joinLocksText(lang));
+  });
+
   bot.callbackQuery(adm.startNotify, async (ctx) => {
     if (!isPanelAdmin(ctx.from?.id)) return;
     const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
     await ctx.answerCallbackQuery();
     const enabled = await isStartNotifyEnabled();
-    const groupId = await getStartNotifyGroupId();
+    const groupId = await getStartNotifyGroupRef();
     const status = enabled ? t(lang, "admin.startNotifyEnabled") : t(lang, "admin.startNotifyDisabled");
     const group = groupId != null ? String(groupId) : "—";
     await ctx.editMessageText(tf(lang, "admin.startNotifyCurrent", { status, group }), {
@@ -882,5 +1133,29 @@ export function setupAdmin(bot: Bot<MyContext>) {
     if (!u) return;
     await setSession(u.id, { state: "admin_start_notify_setup", payload: {} });
     await ctx.reply(t(lang, "admin.startNotifySetPrompt"));
+  });
+
+  bot.callbackQuery(/^adm:ubv:(\d+):(0|1)$/, async (ctx) => {
+    if (!isPanelAdmin(ctx.from?.id)) return;
+    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+    const userId = Number(ctx.match?.[1]);
+    const enabled = ctx.match?.[2] === "1";
+    await updateUserBadges({ userId, verified: enabled });
+    await ctx.answerCallbackQuery({
+      text: enabled ? t(lang, "admin.badgeVerifiedOn") : t(lang, "admin.badgeVerifiedOff"),
+      show_alert: false,
+    });
+  });
+
+  bot.callbackQuery(/^adm:ubp:(\d+):(0|1)$/, async (ctx) => {
+    if (!isPanelAdmin(ctx.from?.id)) return;
+    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+    const userId = Number(ctx.match?.[1]);
+    const enabled = ctx.match?.[2] === "1";
+    await updateUserBadges({ userId, vip: enabled });
+    await ctx.answerCallbackQuery({
+      text: enabled ? t(lang, "admin.badgeVipOn") : t(lang, "admin.badgeVipOff"),
+      show_alert: false,
+    });
   });
 }
