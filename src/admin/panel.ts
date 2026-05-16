@@ -5,7 +5,6 @@ import {
   BotConfigDocumentSchema,
   DEFAULT_BOT_CONFIG,
   getBotConfig,
-  getBotMsg,
   invalidateBotConfigCache,
   labelForLang,
   setBotConfigDocument,
@@ -24,26 +23,22 @@ import type { Language, MyContext, SessionState } from "../types.js";
 import { t, tf } from "../i18n/index.js";
 import {
   adjustDiamondBalance,
-  approveFaceSubmission,
-  banUser,
-  unbanUser,
   countMatches,
   countOpenReports,
-  countUsers,
+  banUser,
+  unbanUser,
+  deleteReferralFileReward,
   getAdminDashboardStats,
   adminGenderDistribution,
   adminOrientationDistribution,
   getUserByTelegramId,
   getUserById,
   getTelegramIdByUserId,
-  getPendingFaceSubmissionUserId,
   listMessageLogs,
   listOpenReports,
-  listPendingFaceSubmissions,
   listReferralFileRewards,
   insertReferralFileReward,
   purgeAllMessageLogs,
-  rejectFaceSubmission,
   resolveReport,
   resetUserNopes,
   setProfileVisibility,
@@ -59,9 +54,6 @@ const MSG_LABEL_KEY: Record<BotMessageKey, string> = {
   no_profile: "admin.msgNoProfile",
   match_notify: "admin.msgMatchNotify",
   profile_saved: "admin.msgProfileSaved",
-  face_submitted: "admin.msgFaceSubmitted",
-  face_approved: "admin.msgFaceApproved",
-  face_rejected: "admin.msgFaceRejected",
   mystery_welcome: "admin.msgMysteryWelcome",
   mystery_chat_started: "admin.msgMysteryWelcome",
   mystery_queue_expired: "admin.msgMysteryWelcome",
@@ -77,13 +69,11 @@ const adm = {
   broadcast: "adm:bc",
   find: "adm:fn",
   logs: "adm:logs",
+  logsPage: (page: number) => `adm:logs:${page}`,
   logToggle: "adm:logtog",
   logPurge: "adm:logpurge",
   logPurgeY: "adm:logpy",
   ret: (h: number) => `adm:ret:${h}`,
-  face: "adm:face",
-  fap: (id: number) => `adm:fap:${id}`,
-  far: (id: number) => `adm:far:${id}`,
   cfg: "adm:cfg",
   cfgReset: "adm:cfgrst",
   cfgHome: "adm:cfghm",
@@ -100,6 +90,7 @@ const adm = {
   sendUser: "adm:su",
   rewardNew: "adm:rw",
   rewardList: "adm:rwl",
+  rewardDelete: (id: number) => `adm:rwd:${id}`,
   startNotify: "adm:sn",
   startNotifyToggle: "adm:snt",
   startNotifySet: "adm:sns",
@@ -113,6 +104,56 @@ const CFG_SECTIONS = [
   "settings",
   "stats",
 ] as const;
+
+const LOG_PAGE = 12;
+
+function adminValueLabel(lang: Language, value: string): string {
+  const key = value.trim().toLowerCase();
+  if (key === "yes") return lang === "fa" ? "بله" : "Yes";
+  if (key === "no") return lang === "fa" ? "خیر" : "No";
+  if (key === "null" || key === "none" || key === "") return "—";
+  return value;
+}
+
+function adminGenderLabel(lang: Language, value: string): string {
+  const map: Record<string, { fa: string; en: string }> = {
+    boy: { fa: "پسر", en: "Boy" },
+    girl: { fa: "دختر", en: "Girl" },
+    trans_boy: { fa: "ترنس پسر", en: "Trans boy" },
+    trans_girl: { fa: "ترنس دختر", en: "Trans girl" },
+    nb_male: { fa: "نـان‌باینری (مذکر)", en: "Non-binary (male)" },
+    nb_female: { fa: "نـان‌باینری (مونث)", en: "Non-binary (female)" },
+    m: { fa: "مرد", en: "Male" },
+    f: { fa: "زن", en: "Female" },
+    x: { fa: "سایر", en: "Other" },
+    null: { fa: "ثبت نشده", en: "Unset" },
+  };
+  const row = map[value] ?? map.null!;
+  return lang === "fa" ? row.fa : row.en;
+}
+
+function adminOrientationLabel(lang: Language, value: string): string {
+  const map: Record<string, { fa: string; en: string }> = {
+    straight: { fa: "استریت", en: "Straight" },
+    gay: { fa: "گی", en: "Gay" },
+    lesbian: { fa: "لزبین", en: "Lesbian" },
+    bi: { fa: "دوجنس‌گرا", en: "Bisexual" },
+    bisexual: { fa: "دوجنس‌گرا", en: "Bisexual" },
+    other: { fa: "سایر", en: "Other" },
+    null: { fa: "ثبت نشده", en: "Unset" },
+  };
+  const row = map[value] ?? map.null!;
+  return lang === "fa" ? row.fa : row.en;
+}
+
+function formatDistribution(
+  lang: Language,
+  rows: Array<{ key: string; c: number }>,
+  labeler: (lang: Language, value: string) => string
+): string {
+  if (rows.length === 0) return "—";
+  return rows.map((row) => `${labeler(lang, row.key)}: ${row.c}`).join("\n");
+}
 
 export function adminRootKb(lang: Language) {
   return new InlineKeyboard()
@@ -132,7 +173,6 @@ export function adminRootKb(lang: Language) {
     .row()
     .text(t(lang, "admin.logPurge"), adm.logPurge)
     .row()
-    .text(t(lang, "admin.faceQueue"), adm.face)
     .text(t(lang, "admin.botConfig"), adm.cfg)
     .row()
     .text(t(lang, "admin.editMessages"), adm.editMessages)
@@ -414,14 +454,16 @@ export function setupAdmin(bot: Bot<MyContext>) {
     if (!isPanelAdmin(ctx.from?.id)) return;
     const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
     await ctx.answerCallbackQuery();
-    const users = await countUsers();
-    const matches = await countMatches();
-    const reports = await countOpenReports();
-    const dash = await getAdminDashboardStats();
-    const gRows = await adminGenderDistribution();
-    const oRows = await adminOrientationDistribution();
-    const genders = gRows.map((r) => `${r.key}: ${r.c}`).join("\n") || "—";
-    const orientations = oRows.map((r) => `${r.key}: ${r.c}`).join("\n") || "—";
+    const [dash, gRows, oRows, matches, reports] = await Promise.all([
+      getAdminDashboardStats(),
+      adminGenderDistribution(),
+      adminOrientationDistribution(),
+      countMatches(),
+      countOpenReports(),
+    ]);
+    const users = dash.totalUsers;
+    const genders = formatDistribution(lang, gRows, adminGenderLabel);
+    const orientations = formatDistribution(lang, oRows, adminOrientationLabel);
     const body = tf(lang, "admin.statsDetailed", {
       users,
       active24: dash.activeUsers24h,
@@ -452,7 +494,11 @@ export function setupAdmin(bot: Bot<MyContext>) {
     }
     let lines = "";
     for (const r of rows) {
-      lines += `${tf(lang, "admin.reportRow", { target: r.target_id, reporter: r.reporter_id })}\n`;
+      lines += `${tf(lang, "admin.reportRow", {
+        target: r.target_id,
+        reporter: r.reporter_id,
+        reason: r.reason || "—",
+      })}\n`;
       kb.text(t(lang, "admin.dismiss"), adm.dismiss(r.reporter_id, r.target_id))
         .text(t(lang, "admin.ban"), adm.ban(r.reporter_id, r.target_id))
         .text(t(lang, "admin.hide"), adm.hide(r.reporter_id, r.target_id))
@@ -536,12 +582,40 @@ export function setupAdmin(bot: Bot<MyContext>) {
     if (!isPanelAdmin(ctx.from?.id)) return;
     const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
     await ctx.answerCallbackQuery();
-    const rows = await listMessageLogs(15, 0);
+    const rows = await listMessageLogs(LOG_PAGE, 0);
     const lines = rows.length
-      ? rows.map((r) => `${r.created_at.slice(0, 19)} [${r.direction}] tg:${r.telegram_user_id} ${r.update_type} ${r.text_preview.slice(0, 40)}`).join("\n")
+      ? rows
+          .map((r) => `${r.created_at.slice(0, 19)} [${r.direction}] tg:${r.telegram_user_id} ${r.update_type} ${r.text_preview.slice(0, 60)}`)
+          .join("\n")
       : t(lang, "admin.logsEmpty");
-    await ctx.reply(lines.slice(0, 3500), {
-      reply_markup: new InlineKeyboard().text(t(lang, "admin.back"), adm.root),
+    const nextRows = rows.length === LOG_PAGE ? await listMessageLogs(1, LOG_PAGE) : [];
+    const kb = new InlineKeyboard();
+    if (nextRows.length > 0) kb.text("»", adm.logsPage(1)).row();
+    kb.text(t(lang, "admin.back"), adm.root);
+    await ctx.editMessageText(lines.slice(0, 3500), {
+      reply_markup: kb,
+    });
+  });
+
+  bot.callbackQuery(/^adm:logs:(\d+)$/, async (ctx) => {
+    if (!isPanelAdmin(ctx.from?.id)) return;
+    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+    const page = Number(ctx.match?.[1] ?? 0);
+    await ctx.answerCallbackQuery();
+    const rows = await listMessageLogs(LOG_PAGE, page * LOG_PAGE);
+    const lines = rows.length
+      ? rows
+          .map((r) => `${r.created_at.slice(0, 19)} [${r.direction}] tg:${r.telegram_user_id} ${r.update_type} ${r.text_preview.slice(0, 60)}`)
+          .join("\n")
+      : t(lang, "admin.logsEmpty");
+    const nextRows = rows.length === LOG_PAGE ? await listMessageLogs(1, (page + 1) * LOG_PAGE) : [];
+    const kb = new InlineKeyboard();
+    if (page > 0) kb.text("«", adm.logsPage(page - 1));
+    if (nextRows.length > 0) kb.text("»", adm.logsPage(page + 1));
+    if (page > 0 || nextRows.length > 0) kb.row();
+    kb.text(t(lang, "admin.back"), adm.root);
+    await ctx.editMessageText(lines.slice(0, 3500), {
+      reply_markup: kb,
     });
   });
 
@@ -580,67 +654,6 @@ export function setupAdmin(bot: Bot<MyContext>) {
     await ctx.answerCallbackQuery();
     await purgeAllMessageLogs();
     await ctx.reply(t(await resolveAdminLang(ctx.from?.id, ctx.from?.language_code), "admin.logPurgeDone"));
-  });
-
-  bot.callbackQuery(adm.face, async (ctx) => {
-    if (!isPanelAdmin(ctx.from?.id)) return;
-    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
-    await ctx.answerCallbackQuery();
-    const pending = await listPendingFaceSubmissions(5);
-    if (pending.length === 0) {
-      await ctx.reply(t(lang, "admin.faceEmpty"));
-      return;
-    }
-    const kb = new InlineKeyboard();
-    for (const p of pending) {
-      kb.text(
-        tf(lang, "admin.faceRow", { id: p.id, uid: p.user_id }),
-        adm.fap(Number(p.id))
-      )
-        .text(t(lang, "admin.faceReject"), adm.far(Number(p.id)))
-        .row();
-    }
-    kb.text(t(lang, "admin.back"), adm.root);
-    await ctx.reply(t(lang, "admin.facePick"), { reply_markup: kb });
-  });
-
-  bot.callbackQuery(/^adm:fap:(\d+)$/, async (ctx) => {
-    if (!isPanelAdmin(ctx.from?.id)) return;
-    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
-    const id = Number(ctx.match?.[1]);
-    await ctx.answerCallbackQuery();
-    const uid = await getPendingFaceSubmissionUserId(id);
-    if (uid == null) return;
-    await approveFaceSubmission({ submissionId: id, reviewerTelegramId: ctx.from!.id });
-    if (uid != null) {
-      const tg = await getTelegramIdByUserId(uid);
-      const cfg = await getBotConfig();
-      const targetRow = await getUserById(uid);
-      const ulang: Language = targetRow?.language === "fa" ? "fa" : "en";
-      if (tg) await ctx.api.sendMessage(tg, getBotMsg(cfg, "face_approved", ulang)).catch(() => {});
-    }
-    await ctx.reply(tf(lang, "admin.faceApproved", { id }));
-  });
-
-  bot.callbackQuery(/^adm:far:(\d+)$/, async (ctx) => {
-    if (!isPanelAdmin(ctx.from?.id)) return;
-    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
-    const id = Number(ctx.match?.[1]);
-    await ctx.answerCallbackQuery();
-    const uid = await getPendingFaceSubmissionUserId(id);
-    await rejectFaceSubmission({
-      submissionId: id,
-      reviewerTelegramId: ctx.from!.id,
-      reason: "admin",
-    });
-    if (uid != null) {
-      const tg = await getTelegramIdByUserId(uid);
-      const cfg = await getBotConfig();
-      const targetRow = await getUserById(uid);
-      const ulang: Language = targetRow?.language === "fa" ? "fa" : "en";
-      if (tg) await ctx.api.sendMessage(tg, getBotMsg(cfg, "face_rejected", ulang)).catch(() => {});
-    }
-    await ctx.reply(tf(lang, "admin.faceRejected", { id }));
   });
 
   bot.callbackQuery(adm.cfg, async (ctx) => {
@@ -810,8 +823,27 @@ export function setupAdmin(bot: Bot<MyContext>) {
       await ctx.reply(t(lang, "admin.rewardListEmpty"));
       return;
     }
-    const lines = rows.map((r) => tf(lang, "admin.rewardRow", { id: r.id, n: r.min_referrals, fa: r.caption_fa }));
-    await ctx.reply(lines.join("\n"), { reply_markup: new InlineKeyboard().text(t(lang, "admin.back"), adm.root) });
+    const kb = new InlineKeyboard();
+    const lines = rows.map((r) => {
+      kb.text(t(lang, "admin.rewardDelete"), adm.rewardDelete(r.id)).row();
+      return tf(lang, "admin.rewardRow", {
+        id: r.id,
+        n: r.min_referrals,
+        fa: r.caption_fa,
+        en: r.caption_en,
+      });
+    });
+    kb.text(t(lang, "admin.back"), adm.root);
+    await ctx.reply(lines.join("\n\n"), { reply_markup: kb });
+  });
+
+  bot.callbackQuery(/^adm:rwd:(\d+)$/, async (ctx) => {
+    if (!isPanelAdmin(ctx.from?.id)) return;
+    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+    const id = Number(ctx.match?.[1]);
+    await ctx.answerCallbackQuery();
+    await deleteReferralFileReward(id);
+    await ctx.reply(tf(lang, "admin.rewardDeleted", { id }));
   });
 
   bot.callbackQuery(adm.startNotify, async (ctx) => {

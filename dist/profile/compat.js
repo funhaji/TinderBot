@@ -137,8 +137,8 @@ export function orientationLabel(lang, o) {
     if (!o || o === "skip")
         return "—";
     const map = {
-        straight: { fa: "مستقیم", en: "Straight" },
-        gay: { fa: "همجنس‌گرا (مرد)", en: "Gay" },
+        straight: { fa: "استریت", en: "Straight" },
+        gay: { fa: "گی", en: "Gay" },
         lesbian: { fa: "لزبین", en: "Lesbian" },
         bi: { fa: "دوجنس‌گرا", en: "Bisexual" },
         bisexual: { fa: "دوجنس‌گرا", en: "Bisexual" },

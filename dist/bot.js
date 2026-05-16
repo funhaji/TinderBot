@@ -1,7 +1,6 @@
 import { Bot, InlineKeyboard } from "grammy";
 import { setupAdmin, tryHandleAdminFollowupMessage } from "./admin/panel.js";
 import { ensureBotConfigSeeded, getBotConfig, getBotMsg, labelForLang } from "./config/botContent.js";
-import { panelAdminTelegramIds } from "./config/access.js";
 import { config } from "./config.js";
 import { notifyStartGroup } from "./features/startNotify.js";
 import { formatDiscoverCaption, explorerMarkup, registerExplorerCallbacks } from "./features/explorer.js";
@@ -15,7 +14,7 @@ import { defaultAvatarFile } from "./util/defaultAvatar.js";
 import { t, tf } from "./i18n/index.js";
 import { formatNowFooter } from "./util/dateFa.js";
 import { cb, langKeyboard, seekGenderKeyboard, settingsKeyboardFull, settingsLangPickKb, wizardGenderKeyboard, wizardOrientationKeyboard, wizardLookingForKeyboard, wizardSeekKeyboard, wizardAgeCategoryKeyboard, wizardAgePickKeyboard, wizardIranLocationKeyboard, } from "./ui/keyboards.js";
-import { addPermanentHide, adjustDiamondBalance, blockUser, countUsers, createFaceSubmission, createReport, deleteUser, discoveryCandidates, ensureMatch, ensureSessionRow, extendedUserStats, getPrimaryPhoto, listPhotoFileIds, getProfile, getSession, getTelegramIdByUserId, findMysteryWaitUser, expireMysteryWaitSessions, expireMysteryVoteSessions, applyReferralMilestonesForReferrer, claimReferralFileReward, getUserByReferralCode, listUnclaimedReferralFileRewardsForUser, socialPairAllowed, getUserById, getUserByTelegramId, getUserInterestKeys, hasLiked, hasMatchBetween, insertMessageLog, insertProfileImpression, listInterests, listLikersNotMatched, listMatchesFor, listTelegramIdsForBroadcast, markReferralBonusPaid, mergeProfilePreferences, replacePhotos, resetSession, setLanguage, setProfileVisibility, setSession, setUserInterests, swipe, upsertProfile, upsertUser, getSystemSettingNumber, } from "./db/repo.js";
+import { addPermanentHide, adjustDiamondBalance, blockUser, countUsers, createReport, deleteUser, discoveryCandidates, ensureMatch, ensureSessionRow, extendedUserStats, getPrimaryPhoto, listPhotoFileIds, getProfile, getSession, getTelegramIdByUserId, findMysteryWaitUser, expireMysteryWaitSessions, expireMysteryVoteSessions, applyReferralMilestonesForReferrer, claimReferralFileReward, getUserByReferralCode, listUnclaimedReferralFileRewardsForUser, socialPairAllowed, getUserById, getUserByTelegramId, getUserInterestKeys, hasLiked, hasMatchBetween, insertMessageLog, insertProfileImpression, listInterests, listLikersNotMatched, listMatchesFor, listTelegramIdsForBroadcast, markReferralBonusPaid, mergeProfilePreferences, replacePhotos, resetSession, setLanguage, setProfileVisibility, setSession, setUserInterests, swipe, upsertProfile, upsertUser, getSystemSettingNumber, } from "./db/repo.js";
 // ── Hardcoded mystery-room strings (no i18n file edits needed) ──────────────
 const MR = {
     prefGender: { fa: "🧭 می‌خوای با کی حرف بزنی؟", en: "🧭 Who do you want to talk to?" },
@@ -260,6 +259,8 @@ async function sendInterestsPickerForEdit(ctx, lang, selected) {
 async function finishSingleFieldEditIfNeeded(ctx, userId, payload, completedStep) {
     if (!shouldCompleteSingleFieldEdit(payload.editField, completedStep))
         return false;
+    if (ctx.callbackQuery)
+        await ctx.answerCallbackQuery().catch(() => { });
     await finalizeProfileWizard(ctx, userId, payload.draft, true, { returnToPicker: true });
     return true;
 }
@@ -392,7 +393,7 @@ async function renderMyProfile(ctx, userId) {
     const prefix = formatProfileBadgesLine(lang, {
         isOwner: telegramId === (config.ownerTelegramId || 7368901661),
         isAdmin: config.adminTelegramIdSet.has(telegramId),
-        verified: !!(urow?.badge_verified || urow?.face_verification_status === "approved"),
+        verified: !!urow?.badge_verified,
         vip: !!urow?.badge_vip,
     });
     const d = "─".repeat(9);
@@ -476,12 +477,6 @@ async function dispatchHomeAction(ctx, u, action) {
             break;
         case "mystery_room":
             await startMysteryRoom(ctx, u.id);
-            break;
-        case "verify_face":
-            await setSession(u.id, { state: "face_verify_wait", payload: {} });
-            await ctx.reply(t(lang, "face.askPhoto"), {
-                reply_markup: new InlineKeyboard().text(t(lang, "wizard.cancel"), "face:cancel"),
-            });
             break;
         case "placeholder":
         default:
@@ -633,7 +628,7 @@ async function renderDiscoverCard(ctx, userId) {
         ? formatProfileBadgesShort(lang, {
             isOwner: tu.telegram_id === (config.ownerTelegramId || 7368901661),
             isAdmin: config.adminTelegramIdSet.has(tu.telegram_id),
-            verified: !!(tu.badge_verified || tu.face_verification_status === "approved"),
+            verified: !!tu.badge_verified,
             vip: !!tu.badge_vip,
         })
         : "";
@@ -687,12 +682,6 @@ async function notifyMatch(ctx, swiperId, targetId) {
     }
 }
 async function canPostLike(swiperUserId, targetId) {
-    const targetP = await getProfile(targetId);
-    const swiperRow = await getUserById(swiperUserId);
-    const swiperVerified = swiperRow?.face_verification_status === "approved" || !!swiperRow?.badge_verified;
-    if (targetP?.preferences.only_verified_can_like_me && !swiperVerified) {
-        return false;
-    }
     if (!(await socialPairAllowed(swiperUserId, targetId)))
         return false;
     return true;
@@ -971,6 +960,7 @@ export async function createBot() {
                 await ctx.reply(t(lang, "admin.userNotFound"));
                 return;
             }
+            const targetProfile = await getProfile(target.id);
             const userKb = new InlineKeyboard()
                 .text(t(lang, "admin.resetNopes"), `adm:rnopes:${target.id}`)
                 .row()
@@ -979,7 +969,12 @@ export async function createBot() {
                 id: target.id,
                 tg: target.telegram_id,
                 username: target.username ?? "—",
-                banned: target.is_banned ? "yes" : "no",
+                banned: target.is_banned ? (lang === "fa" ? "بله" : "Yes") : lang === "fa" ? "خیر" : "No",
+                language: target.language === "fa" ? "فارسی" : "English",
+                diamonds: target.diamond_balance,
+                verified: target.badge_verified ? (lang === "fa" ? "بله" : "Yes") : lang === "fa" ? "خیر" : "No",
+                vip: target.badge_vip ? (lang === "fa" ? "بله" : "Yes") : lang === "fa" ? "خیر" : "No",
+                visible: targetProfile?.visibility === false ? (lang === "fa" ? "خیر" : "No") : lang === "fa" ? "بله" : "Yes",
             }), { reply_markup: userKb });
             return;
         }
@@ -1540,21 +1535,6 @@ export async function createBot() {
             show_alert: false,
         });
     });
-    bot.callbackQuery(cb.setToggleVc, async (ctx) => {
-        const u = await ensureDbUser(ctx);
-        if (!u)
-            return;
-        const p = await getProfile(u.id);
-        if (!p)
-            return;
-        await mergeProfilePreferences(u.id, { only_verified_can_like_me: !p.preferences.only_verified_can_like_me });
-        const lang = await getLang(ctx);
-        const cfg = await getBotConfig();
-        await ctx.answerCallbackQuery();
-        await ctx.editMessageText(labelForLang(cfg.settings.title, lang), {
-            reply_markup: await settingsReplyMarkup(ctx),
-        });
-    });
     bot.callbackQuery(cb.setToggleNl, async (ctx) => {
         const u = await ensureDbUser(ctx);
         if (!u)
@@ -2050,12 +2030,6 @@ export async function createBot() {
             return;
         if (ctx.msg.text.startsWith("/"))
             return next();
-        if (s.state === "face_verify_wait") {
-            await ctx.reply(t(lang, "face.askPhoto"), {
-                reply_markup: new InlineKeyboard().text(t(lang, "wizard.cancel"), "face:cancel"),
-            });
-            return;
-        }
         if (s.state === "idle" || s.state === "discover") {
             await ensureBotConfigSeeded();
             const cfg = await getBotConfig();
@@ -2310,27 +2284,6 @@ export async function createBot() {
         const photos = ctx.msg.photo;
         const best = photos[photos.length - 1];
         const fileId = best.file_id;
-        if (s.state === "face_verify_wait") {
-            const subId = await createFaceSubmission(u.id, fileId);
-            await resetSession(u.id);
-            const cfgFace = await getBotConfig();
-            await ctx.reply(getBotMsg(cfgFace, "face_submitted", lang));
-            const adminLangFace = lang;
-            const usernameSuffix = ctx.from.username ? ` @${ctx.from.username}` : "";
-            const caption = tf(adminLangFace, "admin.faceCaption", {
-                id: subId,
-                uid: u.id,
-                tg: ctx.from.id,
-                username: usernameSuffix,
-            });
-            const kb = new InlineKeyboard()
-                .text(t(adminLangFace, "admin.faceApprove"), `adm:fap:${subId}`)
-                .text(t(adminLangFace, "admin.faceReject"), `adm:far:${subId}`);
-            for (const adminTgId of panelAdminTelegramIds()) {
-                await ctx.api.sendPhoto(adminTgId, fileId, { caption, reply_markup: kb }).catch(() => { });
-            }
-            return;
-        }
         if (s.state !== "profile_wizard")
             return;
         if (s.payload.step !== "photos")
@@ -2447,16 +2400,6 @@ export async function createBot() {
             await ctx.reply(t(lang, "wizard.cancelled"));
             await sendMainMenuReply(ctx);
         }
-    });
-    bot.callbackQuery("face:cancel", async (ctx) => {
-        const u = await ensureDbUser(ctx);
-        if (!u)
-            return;
-        await resetSession(u.id);
-        await ctx.answerCallbackQuery();
-        const lang = await getLang(ctx);
-        await ctx.reply(t(lang, "face.cancelled"));
-        await sendMainMenuReply(ctx);
     });
     bot.callbackQuery(cb.profile, async (ctx) => {
         const u = await ensureDbUser(ctx);

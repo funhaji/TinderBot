@@ -26,7 +26,6 @@ export const cb = {
     settingsHome: "set:home",
     seekToggle: (g) => `seek:${g}`,
     seekDone: "seek:done",
-    setToggleVc: "set:vc",
     setToggleNl: "set:nl",
     setToggleNm: "set:nm",
     setToggleRc: "set:rc",
@@ -60,8 +59,6 @@ function onOff(v) {
 export function settingsKeyboardFull(cfg, lang, prefs) {
     const L = (pair) => labelForLang(pair, lang);
     const kb = new InlineKeyboard()
-        .text(`${onOff(prefs.only_verified_can_like_me)} ${L(cfg.settings.toggles.only_verified)}`, cb.setToggleVc)
-        .row()
         .text(`${onOff(prefs.notify_like)} ${L(cfg.settings.toggles.notify_like)}`, cb.setToggleNl)
         .row()
         .text(`${onOff(prefs.notify_match)} ${L(cfg.settings.toggles.notify_match)}`, cb.setToggleNm)

@@ -4,7 +4,6 @@ import { t } from "../i18n/index.js";
 export const HOME_MENU_ROWS = [
     ["profile", "explore"],
     ["mystery_room"],
-    ["verify_face"],
     ["settings", "stats"],
     ["likes", "matches", "share"],
 ];
@@ -17,7 +16,7 @@ const ACTION_I18N = {
     matches: "home.matches",
     likes: "home.likes",
     mystery_room: "home.mystery_room",
-    verify_face: "home.verify_face",
+    verify_face: "home.placeholder",
     placeholder: "home.placeholder",
 };
 export function buildCodeHomeReplyKeyboard(lang) {

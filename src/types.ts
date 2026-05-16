@@ -14,7 +14,6 @@ export type SessionState =
   | { state: "admin_find"; payload: Record<string, unknown> }
   | { state: "admin_config_wait"; payload: { section: string } }
   | { state: "admin_msg_edit"; payload: { key: string; step: "fa" | "en"; fa?: string } }
-  | { state: "face_verify_wait"; payload: Record<string, unknown> }
   | { state: "admin_diamond_wait"; payload: { mode: "grant" | "deduct" } }
   | { state: "admin_send_user"; payload: { step: "await_telegram" | "await_text"; targetTelegram?: number } }
   | { state: "admin_reward_meta"; payload: Record<string, unknown> }

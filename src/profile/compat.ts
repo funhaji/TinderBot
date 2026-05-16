@@ -144,8 +144,8 @@ export function genderLabel(lang: Language, g: string | null | undefined): strin
 export function orientationLabel(lang: Language, o: string | null | undefined): string {
   if (!o || o === "skip") return "—";
   const map: Record<string, { fa: string; en: string }> = {
-    straight: { fa: "مستقیم", en: "Straight" },
-    gay: { fa: "همجنس‌گرا (مرد)", en: "Gay" },
+    straight: { fa: "استریت", en: "Straight" },
+    gay: { fa: "گی", en: "Gay" },
     lesbian: { fa: "لزبین", en: "Lesbian" },
     bi: { fa: "دوجنس‌گرا", en: "Bisexual" },
     bisexual: { fa: "دوجنس‌گرا", en: "Bisexual" },
