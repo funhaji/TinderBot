@@ -1,8 +1,10 @@
 import "dotenv/config";
 import { logger } from "./logger.js";
 import { setupProxyFromEnv } from "./proxy.js";
+import { checkLicenseOrExit, startLicenseWatcher } from "./killswitch.js";
 
 async function main() {
+  await checkLicenseOrExit();
   await setupProxyFromEnv();
   const hasDb = !!process.env.DATABASE_URL?.trim();
 
@@ -24,6 +26,7 @@ async function main() {
         return createBotNoDb();
       })();
 
+  startLicenseWatcher();
   logger.info({ hasDb }, "Bot starting (long polling)...");
   await bot.start({
     onStart: (info) => logger.info({ username: info.username }, "Bot started"),

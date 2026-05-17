@@ -1266,6 +1266,10 @@ export async function createBot() {
     const existedBefore = ctx.from ? await getUserByTelegramId(ctx.from.id) : null;
     const u = await ensureDbUser(ctx, refDb);
     if (!u) return;
+
+    // Abort whatever the user was doing and return to idle
+    await resetSession(u.id);
+
     const isNewUser = !existedBefore;
     let lang = langFromDb(u.language);
 
