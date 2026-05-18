@@ -1293,7 +1293,35 @@ export async function createBot() {
     const u = await ensureDbUser(ctx, refDb);
     if (!u) return;
 
-    // Abort whatever the user was doing and return to idle
+    // ── Graceful teardown of whatever the user was doing ──────────────────────
+    // Read the session first so we can notify partners / clean up properly,
+    // then reset unconditionally so the user always lands in idle state.
+    const prevSession = await getSession(u.id);
+
+    if (prevSession.state === "chat") {
+      // Notify the other person in the chat that the user has left.
+      const partnerId = prevSession.payload.withUserId;
+      const partnerTgId = await getTelegramIdByUserId(partnerId);
+      if (partnerTgId) {
+        const partnerUser = await getUserById(partnerId);
+        const pLang = partnerUser ? langFromDb(partnerUser.language) : "fa";
+        await ctx.api.sendMessage(partnerTgId, t(pLang, "mystery.partnerLeft")).catch(() => {});
+      }
+    }
+
+    if (prevSession.state === "mystery_vote") {
+      // Notify the other person in the mystery vote that the session ended.
+      const partnerId = prevSession.payload.partnerId;
+      const partnerTgId = await getTelegramIdByUserId(partnerId);
+      if (partnerTgId) {
+        const partnerUser = await getUserById(partnerId);
+        const pLang = partnerUser ? langFromDb(partnerUser.language) : "fa";
+        await ctx.api.sendMessage(partnerTgId, t(pLang, "mystery.partnerLeft")).catch(() => {});
+      }
+      await resetSession(prevSession.payload.partnerId);
+    }
+
+    // Reset this user's session unconditionally — /start always clears everything.
     await resetSession(u.id);
 
     const isNewUser = !existedBefore;
