@@ -686,6 +686,9 @@ async function discoverCore(ctx: MyContext, userId: number) {
     limit: config.DISCOVERY_BATCH_SIZE,
   });
   if (candidates.length === 0) {
+    // Always reset to idle so the session doesn't stay stuck in discover with
+    // a stale candidate list when the user re-enters explore.
+    await resetSession(userId);
     await ctx.reply(t(lang, "discover.noCandidates"));
     return;
   }
@@ -997,6 +1000,29 @@ export async function createBot() {
   await ensureBotConfigSeeded();
   await refreshPanelAdminCache();
   const bot = new Bot<MyContext>(config.BOT_TOKEN);
+
+  // ── Per-user sequential update processing ─────────────────────────────────
+  // grammY's bot.start() processes updates in a polling batch concurrently
+  // (no await per update). This causes a session race condition when a user
+  // quickly sends two interactions (e.g. pressing an inline button and /start)
+  // in the same batch: the callback's setSession(discover) can fire AFTER
+  // /start's resetSession(idle), leaving the session permanently stuck in
+  // discover state and making the bot appear frozen.
+  const _userQueues = new Map<number, Promise<void>>();
+  bot.use(async (ctx, next) => {
+    const userId = ctx.from?.id;
+    if (!userId) return next();
+    const prev = _userQueues.get(userId) ?? Promise.resolve();
+    const current = prev.catch(() => {}).then(() => next());
+    _userQueues.set(userId, current);
+    try {
+      await current;
+    } finally {
+      if (_userQueues.get(userId) === current) {
+        _userQueues.delete(userId);
+      }
+    }
+  });
 
   bot.api.config.use(async (prev, method, payload, signal) => {
     try {
@@ -2223,6 +2249,14 @@ export async function createBot() {
       if (action) {
         if (s.state === "discover" && action !== "explore") await resetSession(u.id);
         await dispatchHomeAction(ctx, u, action);
+        return;
+      }
+      // If the session is stuck in discover but the text doesn't match any home
+      // menu action, escape back to the main menu rather than silently dropping
+      // the message. This is the recovery path for the race-condition freeze.
+      if (s.state === "discover") {
+        await resetSession(u.id);
+        await sendMainMenuReply(ctx);
         return;
       }
     }
