@@ -185,12 +185,23 @@ export async function findMysteryWaitUser(params: {
       const theirSoughtGender = pl.soughtGender ?? null;
       const theirAgeRangeClose = pl.ageRangeClose === true;
       const theirWantSameCountry = pl.wantSameCountry === true;
+      const bothWantFastAny =
+        !params.soughtGender &&
+        !params.ageRangeClose &&
+        !params.wantSameCountry &&
+        !theirSoughtGender &&
+        !theirAgeRangeClose &&
+        !theirWantSameCountry;
 
-      if (!orientationMutualOk(params.myOrientation, params.myGender, theirPrefs.orientation ?? null, row.gender)) {
+      if (
+        !bothWantFastAny &&
+        !orientationMutualOk(params.myOrientation, params.myGender, theirPrefs.orientation ?? null, row.gender)
+      ) {
         continue;
       }
 
       if (
+        !bothWantFastAny &&
         !ageWindowOverlaps(
           params.myAge,
           params.myAgeMin,

@@ -16,7 +16,7 @@ const fa: Dict = {
   "home.share": "اشتراک پرو 🔷",
   "home.stats": "آمار 📊",
   "home.delete": "حذف حساب کاربری ❌",
-  "home.mystery_room": "Mystery Room 🎭 | چت سریع",
+  "home.mystery_room": "Mystery Room 🎭 | جت سریع",
   "home.verify_face": "احراز چهره 📸",
   "home.placeholder": "به‌زودی…",
 

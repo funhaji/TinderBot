@@ -220,6 +220,27 @@ async function startAcceptedChat(ctx: MyContext, userId: number, otherId: number
   await notifyUserByKey(ctx.api, otherId, "chat.start", "chatEnd");
 }
 
+async function startMysteryChatPair(ctx: MyContext, userId: number, partnerId: number, lang: Language) {
+  const partnerUser = await getUserById(partnerId);
+  const partnerLang = partnerUser ? langFromDb(partnerUser.language) : "fa";
+  const partnerTgId = await getTelegramIdByUserId(partnerId);
+  const now = Date.now();
+  await setSession(userId, {
+    state: "chat",
+    payload: { withUserId: partnerId, isMystery: true, startedAt: now, lastActivityAt: now },
+  });
+  await setSession(partnerId, {
+    state: "chat",
+    payload: { withUserId: userId, isMystery: true, startedAt: now, lastActivityAt: now },
+  });
+  await ctx.reply(t(lang, "mystery.matched"), { reply_markup: chatEndKeyboard(lang) });
+  if (partnerTgId) {
+    await ctx.api
+      .sendMessage(partnerTgId, t(partnerLang, "mystery.matched"), { reply_markup: chatEndKeyboard(partnerLang) })
+      .catch(() => {});
+  }
+}
+
 function langFromDb(v: unknown): Language {
   return v === "fa" ? "fa" : "en";
 }
@@ -1607,7 +1628,7 @@ export async function createBot() {
     await ctx.answerCallbackQuery();
     const lang = langFromDb(u.language);
     const s = await getSession(u.id);
-    if (s.state === "chat" || s.state === "mystery_wait" || s.state === "mystery_vote") {
+    if (isChatBusyState(s.state)) {
       await ctx.reply(t(lang, "mystery.alreadyInChat"));
       return;
     }
@@ -1628,7 +1649,7 @@ export async function createBot() {
     await ctx.answerCallbackQuery();
     const lang = langFromDb(u.language);
     const s = await getSession(u.id);
-    if (s.state === "chat" || s.state === "mystery_wait" || s.state === "mystery_vote") {
+    if (isChatBusyState(s.state)) {
       await ctx.reply(t(lang, "mystery.alreadyInChat"));
       return;
     }
@@ -1647,7 +1668,7 @@ export async function createBot() {
     await ctx.answerCallbackQuery();
     const lang = langFromDb(u.language);
     const s = await getSession(u.id);
-    if (s.state === "chat" || s.state === "mystery_wait" || s.state === "mystery_vote") {
+    if (isChatBusyState(s.state)) {
       await ctx.reply(t(lang, "mystery.alreadyInChat"));
       return;
     }
@@ -1671,7 +1692,7 @@ export async function createBot() {
     const ageRangeClose = ctx.match![2] === "close";
     const wantSameCountry = ctx.match![3] === "yes";
     const s = await getSession(u.id);
-    if (s.state === "chat" || s.state === "mystery_wait" || s.state === "mystery_vote") {
+    if (isChatBusyState(s.state)) {
       await ctx.reply(t(lang, "mystery.alreadyInChat"));
       return;
     }
@@ -1682,6 +1703,12 @@ export async function createBot() {
     }
     const prfsMy = myProfile.preferences ?? {};
     await ctx.api.sendChatAction(ctx.chat!.id, "typing").catch(() => {});
+    await setSession(u.id, {
+      state: "mystery_wait",
+      payload: { soughtGender, ageRangeClose, wantSameCountry, enteredAt: Date.now() },
+    });
+    const waitingSession = await getSession(u.id);
+    if (waitingSession.state !== "mystery_wait") return;
     const partnerId = await findMysteryWaitUser({
       excludeUserId: u.id,
       myGender: myProfile.gender,
@@ -1695,29 +1722,8 @@ export async function createBot() {
       wantSameCountry,
     });
     if (partnerId !== null) {
-      const partnerUser = await getUserById(partnerId);
-      const partnerLang = partnerUser ? langFromDb(partnerUser.language) : "fa";
-      const partnerTgId = await getTelegramIdByUserId(partnerId);
-      const now = Date.now();
-      await setSession(u.id, {
-        state: "chat",
-        payload: { withUserId: partnerId, isMystery: true, startedAt: now, lastActivityAt: now },
-      });
-      await setSession(partnerId, {
-        state: "chat",
-        payload: { withUserId: u.id, isMystery: true, startedAt: now, lastActivityAt: now },
-      });
-      await ctx.reply(t(lang, "mystery.matched"), { reply_markup: chatEndKeyboard(lang) });
-      if (partnerTgId) {
-        await ctx.api
-          .sendMessage(partnerTgId, t(partnerLang, "mystery.matched"), { reply_markup: chatEndKeyboard(partnerLang) })
-          .catch(() => {});
-      }
+      await startMysteryChatPair(ctx, u.id, partnerId, lang);
     } else {
-      await setSession(u.id, {
-        state: "mystery_wait",
-        payload: { soughtGender, ageRangeClose, wantSameCountry, enteredAt: Date.now() },
-      });
       await ctx.reply(t(lang, "mystery.waiting"), {
         reply_markup: new InlineKeyboard().text(t(lang, "mystery.cancel"), "mystery:cancel"),
       });
