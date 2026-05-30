@@ -32,7 +32,7 @@ const LEGACY_ACTION_LABELS: Record<HomeMenuAction, string[]> = {
   share: ["Share Pro 🔷", "اشتراک پرو 🔷"],
   matches: ["پیشنهادات 💌", "Matches 💌", "Matches 💞", "مچ‌ها 💞"],
   likes: ["لایک‌ها ❤️", "Likes ❤️", "Likers ❤️"],
-  mystery_room: ["Mystery Room 🎭"],
+  mystery_room: ["Mystery Room 🎭", "Mystery Room 🎭 | Quick Chat", "Mystery Room 🎭 | جت سریع"],
   verify_face: ["احراز چهره 📸", "Face verify 📸"],
   placeholder: ["به‌زودی…", "Coming soon…"],
 };

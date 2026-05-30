@@ -16,7 +16,7 @@ const fa: Dict = {
   "home.share": "اشتراک پرو 🔷",
   "home.stats": "آمار 📊",
   "home.delete": "حذف حساب کاربری ❌",
-  "home.mystery_room": "Mystery Room 🎭",
+  "home.mystery_room": "Mystery Room 🎭 | جت سریع",
   "home.verify_face": "احراز چهره 📸",
   "home.placeholder": "به‌زودی…",
 
@@ -145,6 +145,15 @@ const fa: Dict = {
   "matches.invalid": "این گفتگو مجاز نیست.",
 
   "chat.start": "چت شروع شد. /exit خروج • /block مسدود کردن",
+  "chat.userBusy": "این کاربر الان در یک چت دیگر است.",
+  "chat.requestIncoming": "{name} می‌خواهد با تو چت کند. قبول می‌کنی؟",
+  "chat.requestSent": "درخواست چت ارسال شد. اگر طرف مقابل قبول کند، چت شروع می‌شود.",
+  "chat.requestPending": "یک درخواست چت در جریان است. برای لغو /cancel یا /exit بزن.",
+  "chat.requestAccept": "قبول ✅",
+  "chat.requestDecline": "رد ❌",
+  "chat.requestDeclined": "درخواست چت رد شد.",
+  "chat.requestCancelled": "درخواست چت لغو شد.",
+  "chat.requestExpired": "این درخواست چت دیگر فعال نیست.",
 
   "mystery.welcome": "🎭 Mystery Room\n\n🔸 مچ با تطبیق متقابل جنسیت و گرایش.\n\n🔸 ورود فقط با تکمیل نام، سن، کشور، شهر، جنسیت و گرایش.\n\n🔸 انتظار تا ۵ دقیقه.\n\n🔸 برای استفاده از این بخش هزینه‌ای نداره!\n\n🔸 بعد از ۱۵ دقیقه چت قطع می‌شود و ۵ دقیقه فرصت داری بله/خیر بزنی؛ هر دو بله → اتصال کامل و ارسال پروفایل.\n\nبرای شروع روی دکمه زیر بزن.",
   "mystery.welcome.start": "شروع 🎭",
@@ -167,6 +176,7 @@ const fa: Dict = {
   "mystery.alreadyWaiting": "🔍 هنوز در صف انتظار هستی...",
   "mystery.pleaseWait": "⏳ صبر کن، داریم یک نفر پیدا می‌کنیم. برای لغو: /exit",
   "mystery.partnerLeft": "طرف مقابل از چت خارج شد.",
+  "mystery.inactiveEnded": "چون ۳ دقیقه پیامی رد و بدل نشد، چت بسته شد.",
   "mystery.cancel": "لغو جستجو ❌",
   "mystery.timedOut": "⏰ ۱۵ دقیقه چت تموم شد. الان برات رأی‌گیری شروع می‌شه.",
   "mystery.voteAsk": "⏰ وقت چت تموم شد!\n\nمی‌خواهی با این شخص در ارتباط بمانی؟\n(۵ دقیقه وقت داری)",
@@ -181,6 +191,7 @@ const fa: Dict = {
   "mystery.expiredNoMatch": "❌ کسی در صف پیدا نشد. دوباره تلاش کن.",
 
   "chat.exit": "از چت خارج شدی.",
+  "chat.endButton": "پایان گفتگو",
   "chat.blocked": "کاربر مسدود شد.",
   "chat.unsupported": "این نوع پیام پشتیبانی نمی‌شود.",
 
@@ -347,7 +358,7 @@ const en: Dict = {
   "home.share": "Share Pro 🔷",
   "home.stats": "Stats 📊",
   "home.delete": "Delete account ❌",
-  "home.mystery_room": "Mystery Room 🎭",
+  "home.mystery_room": "Mystery Room 🎭 | Quick Chat",
   "home.verify_face": "Face verify 📸",
   "home.placeholder": "Coming soon…",
 
@@ -476,6 +487,15 @@ const en: Dict = {
   "matches.invalid": "You cannot open this chat.",
 
   "chat.start": "Chat started. /exit to leave • /block to block",
+  "chat.userBusy": "That user is already in another chat.",
+  "chat.requestIncoming": "{name} wants to chat with you. Accept?",
+  "chat.requestSent": "Chat request sent. The chat will start if they accept.",
+  "chat.requestPending": "A chat request is pending. Use /cancel or /exit to cancel it.",
+  "chat.requestAccept": "Accept ✅",
+  "chat.requestDecline": "Decline ❌",
+  "chat.requestDeclined": "Chat request declined.",
+  "chat.requestCancelled": "Chat request cancelled.",
+  "chat.requestExpired": "This chat request is no longer active.",
 
   "mystery.welcome": "🎭 Mystery Room\n\n🔸 Matched by mutual gender & orientation compatibility.\n\n🔸 Entry requires a complete profile: name, age, country, city, gender & orientation.\n\n🔸 Queue wait up to 5 minutes.\n\n🔸 Completely free!\n\n🔸 After 15 min the chat ends and you have 5 min to vote yes/no — both yes → full connect & profiles shared.\n\nPress the button below to start.",
   "mystery.welcome.start": "Start 🎭",
@@ -498,6 +518,7 @@ const en: Dict = {
   "mystery.alreadyWaiting": "🔍 Still searching for a partner…",
   "mystery.pleaseWait": "⏳ Wait, we're finding someone for you. To cancel: /exit",
   "mystery.partnerLeft": "Your chat partner has left.",
+  "mystery.inactiveEnded": "The chat ended because no one sent a message for 3 minutes.",
   "mystery.cancel": "Cancel search ❌",
   "mystery.timedOut": "⏰ 15-minute chat ended. Voting starts now.",
   "mystery.voteAsk": "⏰ Chat time is up!\n\nDo you want to stay connected with this person?\n(You have 5 minutes)",
@@ -512,6 +533,7 @@ const en: Dict = {
   "mystery.expiredNoMatch": "❌ No one found in the queue. Try again.",
 
   "chat.exit": "You left the chat.",
+  "chat.endButton": "End conversation",
   "chat.blocked": "User blocked.",
   "chat.unsupported": "This message type is not supported.",
 

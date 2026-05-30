@@ -1,4 +1,4 @@
-import { Bot, InlineKeyboard } from "grammy";
+import { Bot, InlineKeyboard, Keyboard } from "grammy";
 import { setupAdmin, tryHandleAdminFollowupMessage } from "./admin/panel.js";
 import { ensureBotConfigSeeded, getBotConfig, getBotMsg, labelForLang } from "./config/botContent.js";
 import type { HomeMenuAction } from "./config/botContent.js";
@@ -53,6 +53,7 @@ import {
   getSession,
   getTelegramIdByUserId,
   findMysteryWaitUser,
+  listInactiveMysteryChats,
   expireMysteryWaitSessions,
   expireMysteryVoteSessions,
   applyReferralMilestonesForReferrer,
@@ -106,6 +107,118 @@ function mr(lang: Language, key: string): string {
   return MR[key]?.[lang] ?? key;
 }
 // ────────────────────────────────────────────────────────────────────────────
+
+function chatEndKeyboard(lang: Language) {
+  return new Keyboard().text(t(lang, "chat.endButton")).resized();
+}
+
+function isEndConversationText(text: string | undefined): boolean {
+  if (!text) return false;
+  const trimmed = text.trim();
+  return trimmed === t("en", "chat.endButton") || trimmed === t("fa", "chat.endButton");
+}
+
+function isChatBusyState(state: SessionState["state"]): boolean {
+  return state === "chat" || state === "chat_request" || state === "mystery_wait" || state === "mystery_vote";
+}
+
+async function clearPressedInlineKeyboard(ctx: MyContext) {
+  await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => {});
+}
+
+async function notifyUserById(
+  api: Bot<MyContext>["api"],
+  userId: number,
+  message: string,
+  reply_markup?: ReturnType<typeof buildCodeHomeReplyKeyboard> | ReturnType<typeof chatEndKeyboard>
+) {
+  const tgId = await getTelegramIdByUserId(userId);
+  if (!tgId) return;
+  await api.sendMessage(tgId, message, reply_markup ? { reply_markup } : undefined).catch(() => {});
+}
+
+async function notifyUserByKey(
+  api: Bot<MyContext>["api"],
+  userId: number,
+  key: string,
+  replyMarkup: "home" | "chatEnd" | "none" = "none"
+) {
+  const user = await getUserById(userId);
+  const lang = user ? langFromDb(user.language) : "fa";
+  const markup =
+    replyMarkup === "home"
+      ? buildCodeHomeReplyKeyboard(lang)
+      : replyMarkup === "chatEnd"
+        ? chatEndKeyboard(lang)
+        : undefined;
+  await notifyUserById(api, userId, t(lang, key), markup);
+}
+
+async function resetChatPartner(api: Bot<MyContext>["api"], partnerId: number, userId: number, messageKey: string) {
+  const partnerSession = await getSession(partnerId);
+  if (partnerSession.state === "chat" && partnerSession.payload.withUserId === userId) {
+    await resetSession(partnerId);
+    await notifyUserByKey(api, partnerId, messageKey, "home");
+  }
+}
+
+async function endCurrentChat(ctx: MyContext, userId: number, session: Extract<SessionState, { state: "chat" }>, lang: Language) {
+  const partnerId = session.payload.withUserId;
+  await resetSession(userId);
+  await ctx.reply(t(lang, "chat.exit"), { reply_markup: buildCodeHomeReplyKeyboard(lang) });
+  await resetChatPartner(ctx.api, partnerId, userId, "mystery.partnerLeft");
+}
+
+async function touchMysteryChatActivity(
+  userId: number,
+  partnerId: number,
+  current: Extract<SessionState, { state: "chat" }>
+) {
+  if (!current.payload.isMystery) return;
+  const now = Date.now();
+  const startedAt = current.payload.startedAt ?? now;
+  await setSession(userId, {
+    state: "chat",
+    payload: { ...current.payload, lastActivityAt: now },
+  });
+  const partnerSession = await getSession(partnerId);
+  if (partnerSession.state === "chat" && partnerSession.payload.withUserId === userId) {
+    await setSession(partnerId, {
+      state: "chat",
+      payload: {
+        ...partnerSession.payload,
+        isMystery: true,
+        startedAt: partnerSession.payload.startedAt ?? startedAt,
+        lastActivityAt: now,
+      },
+    });
+  }
+}
+
+async function endInactiveMysteryChat(api: Bot<MyContext>["api"], userId: number, partnerId: number) {
+  const session = await getSession(userId);
+  if (session.state !== "chat" || !session.payload.isMystery || session.payload.withUserId !== partnerId) return;
+  await resetSession(userId);
+  await notifyUserByKey(api, userId, "mystery.inactiveEnded", "home");
+  await resetChatPartner(api, partnerId, userId, "mystery.inactiveEnded");
+}
+
+async function cancelLinkedChatRequest(api: Bot<MyContext>["api"], userId: number, session: Extract<SessionState, { state: "chat_request" }>) {
+  const otherId = session.payload.withUserId;
+  await resetSession(userId);
+  const otherSession = await getSession(otherId);
+  if (otherSession.state === "chat_request" && otherSession.payload.withUserId === userId) {
+    await resetSession(otherId);
+    await notifyUserByKey(api, otherId, "chat.requestCancelled", "home");
+  }
+}
+
+async function startAcceptedChat(ctx: MyContext, userId: number, otherId: number, lang: Language) {
+  await setSession(userId, { state: "chat", payload: { withUserId: otherId } });
+  await setSession(otherId, { state: "chat", payload: { withUserId: userId } });
+  await ctx.reply(t(lang, "chat.start"), { reply_markup: chatEndKeyboard(lang) });
+  await notifyUserByKey(ctx.api, otherId, "chat.start", "chatEnd");
+}
 
 function langFromDb(v: unknown): Language {
   return v === "fa" ? "fa" : "en";
@@ -703,6 +816,10 @@ async function startMysteryRoom(ctx: MyContext, userId: number) {
     await ctx.reply(t(lang, "mystery.alreadyInChat"));
     return;
   }
+  if (s.state === "chat_request") {
+    await ctx.reply(t(lang, "chat.requestPending"));
+    return;
+  }
   if (s.state === "mystery_wait") {
     await ctx.reply(t(lang, "mystery.alreadyWaiting"));
     return;
@@ -1244,8 +1361,28 @@ export async function createBot() {
       }
       return next();
     }
+    if (s.state === "chat_request") {
+      if (!ctx.message.text?.startsWith("/")) {
+        const reqLang = await getLang(ctx);
+        await ctx.reply(t(reqLang, "chat.requestPending"));
+      }
+      return next();
+    }
     if (s.state !== "chat") return next();
+    const txt = ctx.message.text;
+    const chatLang = await getLang(ctx);
+    if (isEndConversationText(txt)) {
+      await endCurrentChat(ctx, u.id, s, chatLang);
+      return;
+    }
     if (s.payload.isMystery && s.payload.startedAt) {
+      const lastActivityAt = s.payload.lastActivityAt ?? s.payload.startedAt;
+      if (Date.now() - lastActivityAt > 3 * 60 * 1000) {
+        await resetSession(u.id);
+        await ctx.reply(t(chatLang, "mystery.inactiveEnded"), { reply_markup: buildCodeHomeReplyKeyboard(chatLang) });
+        await resetChatPartner(ctx.api, s.payload.withUserId, u.id, "mystery.inactiveEnded");
+        return;
+      }
       const elapsed = Date.now() - s.payload.startedAt;
       if (elapsed > 15 * 60 * 1000) {
         const myLang = langFromDb(u.language);
@@ -1253,9 +1390,11 @@ export async function createBot() {
         const partnerUser15 = await getUserById(partnerId15);
         const partnerLang15 = partnerUser15 ? langFromDb(partnerUser15.language) : "fa";
         const partnerTg15 = await getTelegramIdByUserId(partnerId15);
-        await ctx.reply(t(myLang, "mystery.timedOut"));
+        await ctx.reply(t(myLang, "mystery.timedOut"), { reply_markup: { remove_keyboard: true } });
         if (partnerTg15) {
-          await ctx.api.sendMessage(partnerTg15, t(partnerLang15, "mystery.timedOut")).catch(() => {});
+          await ctx.api
+            .sendMessage(partnerTg15, t(partnerLang15, "mystery.timedOut"), { reply_markup: { remove_keyboard: true } })
+            .catch(() => {});
         }
         const nowVote = Date.now();
         await setSession(u.id, { state: "mystery_vote", payload: { partnerId: partnerId15, enteredAt: nowVote } });
@@ -1273,12 +1412,18 @@ export async function createBot() {
         return next();
       }
     }
-    const txt = ctx.message.text;
     if (txt?.startsWith("/")) return next();
+    const partnerSession = await getSession(s.payload.withUserId);
+    if (partnerSession.state !== "chat" || partnerSession.payload.withUserId !== u.id) {
+      await resetSession(u.id);
+      await ctx.reply(t(chatLang, "mystery.partnerLeft"), { reply_markup: buildCodeHomeReplyKeyboard(chatLang) });
+      return;
+    }
     const otherTg = await getTelegramIdByUserId(s.payload.withUserId);
     if (otherTg) {
       try {
         await ctx.api.copyMessage(otherTg, ctx.chat!.id, ctx.message.message_id);
+        await touchMysteryChatActivity(u.id, s.payload.withUserId, s);
       } catch {
         const lang = await getLang(ctx);
         await ctx.reply(t(lang, "chat.unsupported"));
@@ -1299,26 +1444,18 @@ export async function createBot() {
     const prevSession = await getSession(u.id);
 
     if (prevSession.state === "chat") {
-      // Notify the other person in the chat that the user has left.
       const partnerId = prevSession.payload.withUserId;
-      const partnerTgId = await getTelegramIdByUserId(partnerId);
-      if (partnerTgId) {
-        const partnerUser = await getUserById(partnerId);
-        const pLang = partnerUser ? langFromDb(partnerUser.language) : "fa";
-        await ctx.api.sendMessage(partnerTgId, t(pLang, "mystery.partnerLeft")).catch(() => {});
-      }
+      await resetChatPartner(ctx.api, partnerId, u.id, "mystery.partnerLeft");
+    }
+
+    if (prevSession.state === "chat_request") {
+      await cancelLinkedChatRequest(ctx.api, u.id, prevSession);
     }
 
     if (prevSession.state === "mystery_vote") {
-      // Notify the other person in the mystery vote that the session ended.
       const partnerId = prevSession.payload.partnerId;
-      const partnerTgId = await getTelegramIdByUserId(partnerId);
-      if (partnerTgId) {
-        const partnerUser = await getUserById(partnerId);
-        const pLang = partnerUser ? langFromDb(partnerUser.language) : "fa";
-        await ctx.api.sendMessage(partnerTgId, t(pLang, "mystery.partnerLeft")).catch(() => {});
-      }
-      await resetSession(prevSession.payload.partnerId);
+      await resetSession(partnerId);
+      await notifyUserByKey(ctx.api, partnerId, "mystery.partnerLeft", "home");
     }
 
     // Reset this user's session unconditionally — /start always clears everything.
@@ -1346,8 +1483,39 @@ export async function createBot() {
     if (args.matchOther != null) {
       const ok = await hasMatchBetween(u.id, args.matchOther);
       if (ok) {
-        await setSession(u.id, { state: "chat", payload: { withUserId: args.matchOther } });
-        await ctx.reply(t(lang, "chat.start"));
+        const otherSession = await getSession(args.matchOther);
+        const otherTgId = await getTelegramIdByUserId(args.matchOther);
+        if (isChatBusyState(otherSession.state) || !otherTgId) {
+          await ctx.reply(t(lang, "chat.userBusy"));
+          return;
+        }
+        const otherUser = await getUserById(args.matchOther);
+        const otherLang = otherUser ? langFromDb(otherUser.language) : "fa";
+        const myProfile = await getProfile(u.id);
+        const requesterName = myProfile?.display_name ?? (otherLang === "fa" ? "یک نفر" : "Someone");
+        const now = Date.now();
+        await setSession(u.id, {
+          state: "chat_request",
+          payload: { withUserId: args.matchOther, direction: "outgoing", createdAt: now },
+        });
+        await setSession(args.matchOther, {
+          state: "chat_request",
+          payload: { withUserId: u.id, direction: "incoming", createdAt: now },
+        });
+        const kb = new InlineKeyboard()
+          .text(t(otherLang, "chat.requestAccept"), `mchat:accept:${u.id}`)
+          .text(t(otherLang, "chat.requestDecline"), `mchat:decline:${u.id}`);
+        try {
+          await ctx.api.sendMessage(otherTgId, tf(otherLang, "chat.requestIncoming", { name: requesterName }), { reply_markup: kb });
+        } catch {
+          await cancelLinkedChatRequest(ctx.api, u.id, {
+            state: "chat_request",
+            payload: { withUserId: args.matchOther, direction: "outgoing", createdAt: now },
+          });
+          await ctx.reply(t(lang, "errors.generic"));
+          return;
+        }
+        await ctx.reply(t(lang, "chat.requestSent"));
         return;
       }
       await ctx.reply(t(lang, "matches.invalid"));
@@ -1398,16 +1566,13 @@ export async function createBot() {
       await ctx.reply(t(lang, "mystery.cancelled"));
       return;
     }
+    if (s.state === "chat_request") {
+      await cancelLinkedChatRequest(ctx.api, u.id, s);
+      await ctx.reply(t(lang, "chat.requestDeclined"), { reply_markup: buildCodeHomeReplyKeyboard(lang) });
+      return;
+    }
     if (s.state === "chat") {
-      const partnerId = s.payload.withUserId;
-      await resetSession(u.id);
-      await ctx.reply(t(lang, "chat.exit"));
-      const partnerTgIdEx = await getTelegramIdByUserId(partnerId);
-      if (partnerTgIdEx) {
-        const partnerUserEx = await getUserById(partnerId);
-        const pLang = partnerUserEx ? langFromDb(partnerUserEx.language) : "fa";
-        await ctx.api.sendMessage(partnerTgIdEx, t(pLang, "mystery.partnerLeft")).catch(() => {});
-      }
+      await endCurrentChat(ctx, u.id, s, lang);
     }
   });
 
@@ -1419,7 +1584,8 @@ export async function createBot() {
     if (s.state !== "chat") return;
     await blockUser(u.id, s.payload.withUserId);
     await resetSession(u.id);
-    await ctx.reply(t(lang, "chat.blocked"));
+    await ctx.reply(t(lang, "chat.blocked"), { reply_markup: buildCodeHomeReplyKeyboard(lang) });
+    await resetChatPartner(ctx.api, s.payload.withUserId, u.id, "mystery.partnerLeft");
   });
 
   bot.callbackQuery("mystery:cancel", async (ctx) => {
@@ -1427,6 +1593,7 @@ export async function createBot() {
     if (!u) return;
     const s = await getSession(u.id);
     await ctx.answerCallbackQuery();
+    await clearPressedInlineKeyboard(ctx);
     if (s.state !== "mystery_wait") return;
     await resetSession(u.id);
     const lang = await getLang(ctx);
@@ -1439,6 +1606,12 @@ export async function createBot() {
     if (!u) return;
     await ctx.answerCallbackQuery();
     const lang = langFromDb(u.language);
+    const s = await getSession(u.id);
+    if (s.state === "chat" || s.state === "mystery_wait" || s.state === "mystery_vote") {
+      await ctx.reply(t(lang, "mystery.alreadyInChat"));
+      return;
+    }
+    await clearPressedInlineKeyboard(ctx);
     const kb = new InlineKeyboard()
       .text(mr(lang, "prefGender.m"),   "mr:g:m")
       .text(mr(lang, "prefGender.f"),   "mr:g:f")
@@ -1454,6 +1627,12 @@ export async function createBot() {
     if (!u) return;
     await ctx.answerCallbackQuery();
     const lang = langFromDb(u.language);
+    const s = await getSession(u.id);
+    if (s.state === "chat" || s.state === "mystery_wait" || s.state === "mystery_vote") {
+      await ctx.reply(t(lang, "mystery.alreadyInChat"));
+      return;
+    }
+    await clearPressedInlineKeyboard(ctx);
     const g = ctx.match![1];
     const kb = new InlineKeyboard()
       .text(mr(lang, "prefAge.close"), `mr:age:${g}:close`)
@@ -1467,6 +1646,12 @@ export async function createBot() {
     if (!u) return;
     await ctx.answerCallbackQuery();
     const lang = langFromDb(u.language);
+    const s = await getSession(u.id);
+    if (s.state === "chat" || s.state === "mystery_wait" || s.state === "mystery_vote") {
+      await ctx.reply(t(lang, "mystery.alreadyInChat"));
+      return;
+    }
+    await clearPressedInlineKeyboard(ctx);
     const g   = ctx.match![1];
     const age = ctx.match![2];
     const kb = new InlineKeyboard()
@@ -1481,6 +1666,7 @@ export async function createBot() {
     if (!u) return;
     await ctx.answerCallbackQuery();
     const lang = langFromDb(u.language);
+    await clearPressedInlineKeyboard(ctx);
     const soughtGender = ctx.match![1] === "any" ? null : ctx.match![1];
     const ageRangeClose = ctx.match![2] === "close";
     const wantSameCountry = ctx.match![3] === "yes";
@@ -1513,11 +1699,19 @@ export async function createBot() {
       const partnerLang = partnerUser ? langFromDb(partnerUser.language) : "fa";
       const partnerTgId = await getTelegramIdByUserId(partnerId);
       const now = Date.now();
-      await setSession(u.id, { state: "chat", payload: { withUserId: partnerId, isMystery: true, startedAt: now } });
-      await setSession(partnerId, { state: "chat", payload: { withUserId: u.id, isMystery: true, startedAt: now } });
-      await ctx.reply(t(lang, "mystery.matched"));
+      await setSession(u.id, {
+        state: "chat",
+        payload: { withUserId: partnerId, isMystery: true, startedAt: now, lastActivityAt: now },
+      });
+      await setSession(partnerId, {
+        state: "chat",
+        payload: { withUserId: u.id, isMystery: true, startedAt: now, lastActivityAt: now },
+      });
+      await ctx.reply(t(lang, "mystery.matched"), { reply_markup: chatEndKeyboard(lang) });
       if (partnerTgId) {
-        await ctx.api.sendMessage(partnerTgId, t(partnerLang, "mystery.matched")).catch(() => {});
+        await ctx.api
+          .sendMessage(partnerTgId, t(partnerLang, "mystery.matched"), { reply_markup: chatEndKeyboard(partnerLang) })
+          .catch(() => {});
       }
     } else {
       await setSession(u.id, {
@@ -1534,6 +1728,7 @@ export async function createBot() {
     const u = await ensureDbUser(ctx);
     if (!u) return;
     await ctx.answerCallbackQuery();
+    await clearPressedInlineKeyboard(ctx);
     const s = await getSession(u.id);
     if (s.state !== "mystery_vote") return;
     const lang = langFromDb(u.language);
@@ -1573,6 +1768,7 @@ export async function createBot() {
     const u = await ensureDbUser(ctx);
     if (!u) return;
     await ctx.answerCallbackQuery();
+    await clearPressedInlineKeyboard(ctx);
     const s = await getSession(u.id);
     if (s.state !== "mystery_vote") return;
     const lang = langFromDb(u.language);
@@ -1613,6 +1809,11 @@ export async function createBot() {
     ) {
       await resetSession(u.id);
       await ctx.reply(t(lang, "admin.broadcastCancelled"));
+      return;
+    }
+    if (s.state === "chat_request") {
+      await cancelLinkedChatRequest(ctx.api, u.id, s);
+      await ctx.reply(t(lang, "chat.requestDeclined"), { reply_markup: buildCodeHomeReplyKeyboard(lang) });
     }
   });
 
@@ -1999,14 +2200,95 @@ export async function createBot() {
     if (!u) return;
     const otherId = Number(ctx.match?.[1]);
     const lang = await getLang(ctx);
+    const currentSession = await getSession(u.id);
+    if (isChatBusyState(currentSession.state)) {
+      await ctx.answerCallbackQuery({
+        text: currentSession.state === "chat_request" ? t(lang, "chat.requestPending") : t(lang, "mystery.alreadyInChat"),
+        show_alert: true,
+      });
+      return;
+    }
     const ok = await hasMatchBetween(u.id, otherId);
     if (!ok) {
       await ctx.answerCallbackQuery({ text: t(lang, "matches.invalid"), show_alert: true });
       return;
     }
+    const otherSession = await getSession(otherId);
+    if (isChatBusyState(otherSession.state)) {
+      await ctx.answerCallbackQuery({ text: t(lang, "chat.userBusy"), show_alert: true });
+      return;
+    }
+    const otherTgId = await getTelegramIdByUserId(otherId);
+    if (!otherTgId) {
+      await ctx.answerCallbackQuery({ text: t(lang, "errors.generic"), show_alert: true });
+      return;
+    }
+    const otherUser = await getUserById(otherId);
+    const otherLang = otherUser ? langFromDb(otherUser.language) : "fa";
+    const myProfile = await getProfile(u.id);
+    const requesterName = myProfile?.display_name ?? (lang === "fa" ? "یک نفر" : "Someone");
+    const now = Date.now();
+    await setSession(u.id, { state: "chat_request", payload: { withUserId: otherId, direction: "outgoing", createdAt: now } });
+    await setSession(otherId, { state: "chat_request", payload: { withUserId: u.id, direction: "incoming", createdAt: now } });
     await ctx.answerCallbackQuery();
-    await setSession(u.id, { state: "chat", payload: { withUserId: otherId } });
-    await ctx.reply(t(lang, "chat.start"));
+    await clearPressedInlineKeyboard(ctx);
+    const kb = new InlineKeyboard()
+      .text(t(otherLang, "chat.requestAccept"), `mchat:accept:${u.id}`)
+      .text(t(otherLang, "chat.requestDecline"), `mchat:decline:${u.id}`);
+    try {
+      await ctx.api.sendMessage(otherTgId, tf(otherLang, "chat.requestIncoming", { name: requesterName }), { reply_markup: kb });
+    } catch {
+      await cancelLinkedChatRequest(ctx.api, u.id, {
+        state: "chat_request",
+        payload: { withUserId: otherId, direction: "outgoing", createdAt: now },
+      });
+      await ctx.reply(t(lang, "errors.generic"));
+      return;
+    }
+    await ctx.reply(t(lang, "chat.requestSent"));
+  });
+
+  bot.callbackQuery(/^mchat:accept:(\d+)$/, async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const requesterId = Number(ctx.match?.[1]);
+    const lang = await getLang(ctx);
+    const s = await getSession(u.id);
+    if (s.state !== "chat_request" || s.payload.direction !== "incoming" || s.payload.withUserId !== requesterId) {
+      await ctx.answerCallbackQuery({ text: t(lang, "matches.invalid"), show_alert: true });
+      return;
+    }
+    const requesterSession = await getSession(requesterId);
+    const ok =
+      requesterSession.state === "chat_request" &&
+      requesterSession.payload.direction === "outgoing" &&
+      requesterSession.payload.withUserId === u.id &&
+      (await hasMatchBetween(u.id, requesterId));
+    if (!ok) {
+      await resetSession(u.id);
+      await ctx.answerCallbackQuery({ text: t(lang, "chat.requestExpired"), show_alert: true });
+      await ctx.reply(t(lang, "chat.requestExpired"), { reply_markup: buildCodeHomeReplyKeyboard(lang) });
+      return;
+    }
+    await ctx.answerCallbackQuery();
+    await clearPressedInlineKeyboard(ctx);
+    await startAcceptedChat(ctx, u.id, requesterId, lang);
+  });
+
+  bot.callbackQuery(/^mchat:decline:(\d+)$/, async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const requesterId = Number(ctx.match?.[1]);
+    const lang = await getLang(ctx);
+    const s = await getSession(u.id);
+    if (s.state !== "chat_request" || s.payload.direction !== "incoming" || s.payload.withUserId !== requesterId) {
+      await ctx.answerCallbackQuery({ text: t(lang, "matches.invalid"), show_alert: true });
+      return;
+    }
+    await ctx.answerCallbackQuery();
+    await clearPressedInlineKeyboard(ctx);
+    await cancelLinkedChatRequest(ctx.api, u.id, s);
+    await ctx.reply(t(lang, "chat.requestDeclined"), { reply_markup: buildCodeHomeReplyKeyboard(lang) });
   });
 
   bot.callbackQuery(/^lkback:(\d+)$/, async (ctx) => {
@@ -2681,8 +2963,14 @@ export async function createBot() {
           }
         } catch {}
       }
+      const inactiveChats = await listInactiveMysteryChats(Date.now() - 3 * 60 * 1000);
+      for (const chat of inactiveChats) {
+        try {
+          await endInactiveMysteryChat(bot.api, chat.userId, chat.partnerId);
+        } catch {}
+      }
     } catch {}
-  }, 5 * 60 * 1000);
+  }, 60 * 1000);
 
   return bot;
 }

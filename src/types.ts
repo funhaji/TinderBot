@@ -7,6 +7,7 @@ export type SessionState =
   | { state: "idle"; payload?: Record<string, unknown> }
   | { state: "profile_wizard"; payload: ProfileWizardPayload }
   | { state: "discover"; payload: DiscoverPayload }
+  | { state: "chat_request"; payload: ChatRequestPayload }
   | { state: "chat"; payload: ChatPayload }
   | { state: "mystery_wait"; payload: Record<string, unknown> }
   | { state: "mystery_vote"; payload: MysteryVotePayload }
@@ -81,6 +82,13 @@ export type ChatPayload = {
   withUserId: number;
   isMystery?: boolean;
   startedAt?: number;
+  lastActivityAt?: number;
+};
+
+export type ChatRequestPayload = {
+  withUserId: number;
+  direction: "incoming" | "outgoing";
+  createdAt: number;
 };
 
 export type MysteryVotePayload = {

@@ -270,6 +270,33 @@ export async function expireMysteryVoteSessions(): Promise<{ userId: number; tel
   }));
 }
 
+export async function listInactiveMysteryChats(
+  cutoffMs: number
+): Promise<{ userId: number; telegramId: number; language: string; partnerId: number }[]> {
+  const res = await query<{ user_id: number; telegram_id: string; language: string; partner_id: number }>(
+    `SELECT s.user_id, u.telegram_id::text, COALESCE(u.language, 'fa') AS language,
+            (s.payload->>'withUserId')::int AS partner_id
+     FROM sessions s
+     JOIN users u ON u.id = s.user_id
+     WHERE s.state = 'chat'
+       AND s.payload->>'isMystery' = 'true'
+       AND (s.payload->>'withUserId') IS NOT NULL
+       AND COALESCE(
+         (s.payload->>'lastActivityAt')::bigint,
+         (s.payload->>'startedAt')::bigint,
+         floor(extract(epoch from s.updated_at) * 1000)::bigint
+       ) < $1
+     ORDER BY s.updated_at ASC`,
+    [cutoffMs]
+  );
+  return res.rows.map((r) => ({
+    userId: r.user_id,
+    telegramId: Number(r.telegram_id),
+    language: r.language,
+    partnerId: r.partner_id,
+  }));
+}
+
 export async function ensureSessionRow(userId: number) {
   await query(
     `
