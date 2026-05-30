@@ -122,6 +122,10 @@ function isChatBusyState(state: SessionState["state"]): boolean {
   return state === "chat" || state === "chat_request" || state === "mystery_wait" || state === "mystery_vote";
 }
 
+function sameUserId(a: unknown, b: unknown): boolean {
+  return Number(a) === Number(b);
+}
+
 async function clearPressedInlineKeyboard(ctx: MyContext) {
   await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => {});
 }
@@ -156,7 +160,7 @@ async function notifyUserByKey(
 
 async function resetChatPartner(api: Bot<MyContext>["api"], partnerId: number, userId: number, messageKey: string) {
   const partnerSession = await getSession(partnerId);
-  if (partnerSession.state === "chat" && partnerSession.payload.withUserId === userId) {
+  if (partnerSession.state === "chat" && sameUserId(partnerSession.payload.withUserId, userId)) {
     await resetSession(partnerId);
     await notifyUserByKey(api, partnerId, messageKey, "home");
   }
@@ -182,7 +186,7 @@ async function touchMysteryChatActivity(
     payload: { ...current.payload, lastActivityAt: now },
   });
   const partnerSession = await getSession(partnerId);
-  if (partnerSession.state === "chat" && partnerSession.payload.withUserId === userId) {
+  if (partnerSession.state === "chat" && sameUserId(partnerSession.payload.withUserId, userId)) {
     await setSession(partnerId, {
       state: "chat",
       payload: {
@@ -197,7 +201,7 @@ async function touchMysteryChatActivity(
 
 async function endInactiveMysteryChat(api: Bot<MyContext>["api"], userId: number, partnerId: number) {
   const session = await getSession(userId);
-  if (session.state !== "chat" || !session.payload.isMystery || session.payload.withUserId !== partnerId) return;
+  if (session.state !== "chat" || !session.payload.isMystery || !sameUserId(session.payload.withUserId, partnerId)) return;
   await resetSession(userId);
   await notifyUserByKey(api, userId, "mystery.inactiveEnded", "home");
   await resetChatPartner(api, partnerId, userId, "mystery.inactiveEnded");
@@ -207,7 +211,7 @@ async function cancelLinkedChatRequest(api: Bot<MyContext>["api"], userId: numbe
   const otherId = session.payload.withUserId;
   await resetSession(userId);
   const otherSession = await getSession(otherId);
-  if (otherSession.state === "chat_request" && otherSession.payload.withUserId === userId) {
+  if (otherSession.state === "chat_request" && sameUserId(otherSession.payload.withUserId, userId)) {
     await resetSession(otherId);
     await notifyUserByKey(api, otherId, "chat.requestCancelled", "home");
   }
@@ -1435,7 +1439,7 @@ export async function createBot() {
     }
     if (txt?.startsWith("/")) return next();
     const partnerSession = await getSession(s.payload.withUserId);
-    if (partnerSession.state !== "chat" || partnerSession.payload.withUserId !== u.id) {
+    if (partnerSession.state !== "chat" || !sameUserId(partnerSession.payload.withUserId, u.id)) {
       await resetSession(u.id);
       await ctx.reply(t(chatLang, "mystery.partnerLeft"), { reply_markup: buildCodeHomeReplyKeyboard(chatLang) });
       return;
@@ -2260,7 +2264,7 @@ export async function createBot() {
     const requesterId = Number(ctx.match?.[1]);
     const lang = await getLang(ctx);
     const s = await getSession(u.id);
-    if (s.state !== "chat_request" || s.payload.direction !== "incoming" || s.payload.withUserId !== requesterId) {
+    if (s.state !== "chat_request" || s.payload.direction !== "incoming" || !sameUserId(s.payload.withUserId, requesterId)) {
       await ctx.answerCallbackQuery({ text: t(lang, "matches.invalid"), show_alert: true });
       return;
     }
@@ -2268,7 +2272,7 @@ export async function createBot() {
     const ok =
       requesterSession.state === "chat_request" &&
       requesterSession.payload.direction === "outgoing" &&
-      requesterSession.payload.withUserId === u.id &&
+      sameUserId(requesterSession.payload.withUserId, u.id) &&
       (await hasMatchBetween(u.id, requesterId));
     if (!ok) {
       await resetSession(u.id);
@@ -2287,7 +2291,7 @@ export async function createBot() {
     const requesterId = Number(ctx.match?.[1]);
     const lang = await getLang(ctx);
     const s = await getSession(u.id);
-    if (s.state !== "chat_request" || s.payload.direction !== "incoming" || s.payload.withUserId !== requesterId) {
+    if (s.state !== "chat_request" || s.payload.direction !== "incoming" || !sameUserId(s.payload.withUserId, requesterId)) {
       await ctx.answerCallbackQuery({ text: t(lang, "matches.invalid"), show_alert: true });
       return;
     }
