@@ -11,7 +11,15 @@ import { IRAN_COUNTRY_EN, provinceLabel } from "./config/iranGeo.js";
 import { logger } from "./logger.js";
 import { formatProfileBadgesLine, formatProfileBadgesShort } from "./profile/badges.js";
 import { genderLabel, orientationLabel } from "./profile/compat.js";
-import type { Language, LookingFor, MyContext, ProfileWizardPayload, ProfileWizardStep, SessionState } from "./types.js";
+import type {
+  DiscoverFilterPayload,
+  Language,
+  LookingFor,
+  MyContext,
+  ProfileWizardPayload,
+  ProfileWizardStep,
+  SessionState,
+} from "./types.js";
 import {
   profileEditGlassKeyboard,
   profileEditStartStep,
@@ -800,7 +808,7 @@ async function startFeatureSetupWizard(ctx: MyContext, userId: number, feature: 
 
 async function launchFeature(ctx: MyContext, userId: number, feature: "mystery" | "discover") {
   if (feature === "mystery") await launchMysteryWelcome(ctx, userId);
-  else await discoverCore(ctx, userId);
+  else await launchDiscoverFilters(ctx, userId);
 }
 
 async function launchMysteryWelcome(ctx: MyContext, userId: number) {
@@ -810,7 +818,41 @@ async function launchMysteryWelcome(ctx: MyContext, userId: number) {
   await ctx.reply(getBotMsg(cfg, "mystery_welcome", lang), { reply_markup: kb });
 }
 
-async function discoverCore(ctx: MyContext, userId: number) {
+function defaultDiscoverFilters(): DiscoverFilterPayload {
+  return { sameCity: false, age: "profile", gender: "profile" };
+}
+
+function discoverFilterKeyboard(lang: Language, filters: DiscoverFilterPayload) {
+  const on = lang === "fa" ? "روشن" : "On";
+  const off = lang === "fa" ? "خاموش" : "Off";
+  const ageKey =
+    filters.age === "profile"
+      ? "discover.filter.age.profile"
+      : filters.age === "near"
+        ? "discover.filter.age.near"
+        : "discover.filter.age.any";
+  const genderKey = filters.gender === "profile" ? "discover.filter.gender.profile" : "discover.filter.gender.any";
+  return new InlineKeyboard()
+    .text(`${filters.sameCity ? on : off} · ${t(lang, "discover.filter.city")}`, "df:city")
+    .row()
+    .text(t(lang, ageKey), "df:age")
+    .row()
+    .text(t(lang, genderKey), "df:gender")
+    .row()
+    .text(t(lang, "discover.filter.start"), "df:start")
+    .row()
+    .text(t(lang, "discover.filter.reset"), "df:reset")
+    .text(t(lang, "discover.filter.cancel"), "df:cancel");
+}
+
+async function launchDiscoverFilters(ctx: MyContext, userId: number) {
+  const lang = await getLang(ctx);
+  const filters = defaultDiscoverFilters();
+  await setSession(userId, { state: "discover_filter", payload: filters });
+  await ctx.reply(t(lang, "discover.filter.prompt"), { reply_markup: discoverFilterKeyboard(lang, filters) });
+}
+
+async function discoverCore(ctx: MyContext, userId: number, filters: DiscoverFilterPayload = defaultDiscoverFilters()) {
   const lang = await getLang(ctx);
   await ctx.api.sendChatAction(ctx.chat!.id, "typing").catch(() => {});
   const p = await getProfile(userId);
@@ -822,15 +864,18 @@ async function discoverCore(ctx: MyContext, userId: number) {
     lon: p.location_lon,
     radiusMeters: radius,
     limit: config.DISCOVERY_BATCH_SIZE,
+    ageFilter: filters.age,
+    genderFilter: filters.gender,
+    sameCity: filters.sameCity,
   });
   if (candidates.length === 0) {
-    // Always reset to idle so the session doesn't stay stuck in discover with
-    // a stale candidate list when the user re-enters explore.
-    await resetSession(userId);
-    await ctx.reply(t(lang, "discover.noCandidates"));
+    await setSession(userId, { state: "discover_filter", payload: filters });
+    await ctx.reply(`${t(lang, "discover.noCandidates")}\n\n${t(lang, "discover.filter.prompt")}`, {
+      reply_markup: discoverFilterKeyboard(lang, filters),
+    });
     return;
   }
-  await setSession(userId, { state: "discover", payload: { candidates, idx: 0, sub: "main" } });
+  await setSession(userId, { state: "discover", payload: { candidates, idx: 0, sub: "main", filters } });
   await renderDiscoverCard(ctx, userId);
 }
 
@@ -884,7 +929,7 @@ async function discoverStart(ctx: MyContext, userId: number) {
     await startFeatureSetupWizard(ctx, userId, "discover");
     return;
   }
-  await discoverCore(ctx, userId);
+  await launchDiscoverFilters(ctx, userId);
 }
 
 async function renderDiscoverCard(ctx: MyContext, userId: number) {
@@ -1393,6 +1438,15 @@ export async function createBot() {
       }
       return next();
     }
+    if (s.state === "discover_filter") {
+      if (!ctx.message.text?.startsWith("/")) {
+        const dfLang = await getLang(ctx);
+        await ctx.reply(t(dfLang, "discover.filter.prompt"), {
+          reply_markup: discoverFilterKeyboard(dfLang, s.payload),
+        });
+      }
+      return next();
+    }
     if (s.state !== "chat") return next();
     const txt = ctx.message.text;
     const chatLang = await getLang(ctx);
@@ -1824,6 +1878,11 @@ export async function createBot() {
     if (s.state === "chat_request") {
       await cancelLinkedChatRequest(ctx.api, u.id, s);
       await ctx.reply(t(lang, "chat.requestDeclined"), { reply_markup: buildCodeHomeReplyKeyboard(lang) });
+      return;
+    }
+    if (s.state === "discover_filter") {
+      await resetSession(u.id);
+      await sendMainMenuReply(ctx);
     }
   });
 
@@ -1954,6 +2013,80 @@ export async function createBot() {
     if (!u) return;
     await ctx.answerCallbackQuery();
     await sendMainMenuReply(ctx);
+  });
+
+  bot.callbackQuery("df:city", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    const lang = await getLang(ctx);
+    if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
+    const filters = { ...s.payload, sameCity: !s.payload.sameCity };
+    await setSession(u.id, { state: "discover_filter", payload: filters });
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageText(t(lang, "discover.filter.prompt"), {
+      reply_markup: discoverFilterKeyboard(lang, filters),
+    });
+  });
+
+  bot.callbackQuery("df:age", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    const lang = await getLang(ctx);
+    if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
+    const age = s.payload.age === "profile" ? "near" : s.payload.age === "near" ? "any" : "profile";
+    const filters: DiscoverFilterPayload = { ...s.payload, age };
+    await setSession(u.id, { state: "discover_filter", payload: filters });
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageText(t(lang, "discover.filter.prompt"), {
+      reply_markup: discoverFilterKeyboard(lang, filters),
+    });
+  });
+
+  bot.callbackQuery("df:gender", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    const lang = await getLang(ctx);
+    if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
+    const filters: DiscoverFilterPayload = { ...s.payload, gender: s.payload.gender === "profile" ? "any" : "profile" };
+    await setSession(u.id, { state: "discover_filter", payload: filters });
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageText(t(lang, "discover.filter.prompt"), {
+      reply_markup: discoverFilterKeyboard(lang, filters),
+    });
+  });
+
+  bot.callbackQuery("df:reset", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const lang = await getLang(ctx);
+    const filters = defaultDiscoverFilters();
+    await setSession(u.id, { state: "discover_filter", payload: filters });
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageText(t(lang, "discover.filter.prompt"), {
+      reply_markup: discoverFilterKeyboard(lang, filters),
+    });
+  });
+
+  bot.callbackQuery("df:cancel", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    await ctx.answerCallbackQuery();
+    await clearPressedInlineKeyboard(ctx);
+    await resetSession(u.id);
+    await sendMainMenuReply(ctx);
+  });
+
+  bot.callbackQuery("df:start", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
+    await ctx.answerCallbackQuery();
+    await clearPressedInlineKeyboard(ctx);
+    await discoverCore(ctx, u.id, s.payload);
   });
 
   bot.callbackQuery(cb.discover, async (ctx) => {

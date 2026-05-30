@@ -6,6 +6,7 @@ export type Language = "fa" | "en";
 export type SessionState =
   | { state: "idle"; payload?: Record<string, unknown> }
   | { state: "profile_wizard"; payload: ProfileWizardPayload }
+  | { state: "discover_filter"; payload: DiscoverFilterPayload }
   | { state: "discover"; payload: DiscoverPayload }
   | { state: "chat_request"; payload: ChatRequestPayload }
   | { state: "chat"; payload: ChatPayload }
@@ -76,6 +77,16 @@ export type DiscoverPayload = {
   idx: number;
   cardMessageId?: number;
   sub?: "main" | "more";
+  filters?: DiscoverFilterPayload;
+};
+
+export type DiscoverAgeFilter = "profile" | "near" | "any";
+export type DiscoverGenderFilter = "profile" | "any";
+
+export type DiscoverFilterPayload = {
+  sameCity: boolean;
+  age: DiscoverAgeFilter;
+  gender: DiscoverGenderFilter;
 };
 
 export type ChatPayload = {

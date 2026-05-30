@@ -606,6 +606,9 @@ export async function discoveryCandidates(params: {
   lon: number | null;
   radiusMeters: number;
   limit: number;
+  ageFilter?: "profile" | "near" | "any";
+  genderFilter?: "profile" | "any";
+  sameCity?: boolean;
 }): Promise<number[]> {
   const res = await query<{ id: number }>(
     `
@@ -638,8 +641,15 @@ export async function discoveryCandidates(params: {
       AND a.id IS NULL
       AND bl.id IS NULL
       AND h.id IS NULL
-      AND p.age >= COALESCE((me.preferences->>'age_min')::int, 15)
-      AND p.age <= COALESCE((me.preferences->>'age_max')::int, 99)
+      AND (
+        $4::text = 'any'
+        OR ($4::text = 'near' AND ABS(p.age - me.age) <= 5)
+        OR (
+          $4::text = 'profile'
+          AND p.age >= COALESCE((me.preferences->>'age_min')::int, 15)
+          AND p.age <= COALESCE((me.preferences->>'age_max')::int, 99)
+        )
+      )
       AND me.age >= COALESCE((p.preferences->>'age_min')::int, 15)
       AND me.age <= COALESCE((p.preferences->>'age_max')::int, 99)
       AND orientation_mutual_ok(
@@ -649,14 +659,17 @@ export async function discoveryCandidates(params: {
         p.gender::text
       )
       AND (
-        me.preferences->'seek_genders' IS NULL
-        OR jsonb_typeof(me.preferences->'seek_genders') <> 'array'
-        OR jsonb_array_length(COALESCE(me.preferences->'seek_genders', '[]'::jsonb)) = 0
-        OR p.gender IS NULL
+        $5::text = 'any'
         OR (
-          (me.preferences->'seek_genders' @> '["m"]'::jsonb AND profile_phys_sex(p.gender::text) = 'm')
-          OR (me.preferences->'seek_genders' @> '["f"]'::jsonb AND profile_phys_sex(p.gender::text) = 'f')
-          OR (me.preferences->'seek_genders' @> '["x"]'::jsonb AND profile_phys_sex(p.gender::text) IS NULL)
+          me.preferences->'seek_genders' IS NULL
+          OR jsonb_typeof(me.preferences->'seek_genders') <> 'array'
+          OR jsonb_array_length(COALESCE(me.preferences->'seek_genders', '[]'::jsonb)) = 0
+          OR p.gender IS NULL
+          OR (
+            (me.preferences->'seek_genders' @> '["m"]'::jsonb AND profile_phys_sex(p.gender::text) = 'm')
+            OR (me.preferences->'seek_genders' @> '["f"]'::jsonb AND profile_phys_sex(p.gender::text) = 'f')
+            OR (me.preferences->'seek_genders' @> '["x"]'::jsonb AND profile_phys_sex(p.gender::text) IS NULL)
+          )
         )
       )
       AND (
@@ -693,14 +706,14 @@ export async function discoveryCandidates(params: {
         )
       )
       AND (
-        COALESCE((me.preferences->>'prefer_same_country')::boolean, false) = false
-        OR COALESCE(me.preferences->>'country', '') = ''
-        OR LOWER(COALESCE(p.preferences->>'country', '')) = LOWER(COALESCE(me.preferences->>'country', ''))
+        $6::boolean = false
+        OR COALESCE(me.city, '') = ''
+        OR LOWER(COALESCE(p.city, '')) = LOWER(COALESCE(me.city, ''))
       )
     ORDER BY
       CASE
-        WHEN COALESCE(me.preferences->>'country', '') != ''
-          AND LOWER(COALESCE(p.preferences->>'country', '')) = LOWER(COALESCE(me.preferences->>'country', ''))
+        WHEN COALESCE(me.city, '') != ''
+          AND LOWER(COALESCE(p.city, '')) = LOWER(COALESCE(me.city, ''))
         THEN 0 ELSE 1
       END,
       CASE
@@ -722,7 +735,14 @@ export async function discoveryCandidates(params: {
       p.updated_at DESC
     LIMIT $2
   `,
-    [params.meId, params.limit, params.radiusMeters]
+    [
+      params.meId,
+      params.limit,
+      params.radiusMeters,
+      params.ageFilter ?? "profile",
+      params.genderFilter ?? "profile",
+      params.sameCity === true,
+    ]
   );
   return res.rows.map((r) => r.id);
 }
