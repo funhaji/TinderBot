@@ -18,6 +18,7 @@ export type SessionState =
   | { state: "admin_config_wait"; payload: { section: string } }
   | { state: "admin_msg_edit"; payload: { key: string; step: "fa" | "en"; fa?: string } }
   | { state: "admin_diamond_wait"; payload: { mode: "grant" | "deduct" } }
+  | { state: "admin_profile_edit"; payload: AdminProfileEditPayload }
   | { state: "admin_send_user"; payload: { step: "await_telegram" | "await_text"; targetTelegram?: number } }
   | { state: "admin_reward_meta"; payload: Record<string, unknown> }
   | { state: "admin_reward_file"; payload: { minReferrals: number; captionFa: string; captionEn: string } }
@@ -26,6 +27,14 @@ export type SessionState =
   | { state: "admin_join_lock_add"; payload: Record<string, unknown> }
   | { state: "admin_admin_add"; payload: Record<string, unknown> }
   | { state: "admin_admin_remove"; payload: Record<string, unknown> };
+
+export type AdminProfileEditField = "display_name" | "age" | "city" | "country" | "bio";
+
+export type AdminProfileEditPayload = {
+  targetUserId: number;
+  field: AdminProfileEditField;
+  reporterId?: number;
+};
 
 export type ProfileWizardStep =
   | "name"

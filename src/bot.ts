@@ -1,9 +1,14 @@
 import { Bot, InlineKeyboard, Keyboard } from "grammy";
-import { setupAdmin, tryHandleAdminFollowupMessage } from "./admin/panel.js";
+import {
+  buildAdminReportActionsKeyboard,
+  buildAdminUserCard,
+  setupAdmin,
+  tryHandleAdminFollowupMessage,
+} from "./admin/panel.js";
 import { ensureBotConfigSeeded, getBotConfig, getBotMsg, labelForLang } from "./config/botContent.js";
 import type { HomeMenuAction } from "./config/botContent.js";
 import { config } from "./config.js";
-import { isPanelAdmin, refreshPanelAdminCache } from "./config/access.js";
+import { isPanelAdmin, panelAdminTelegramIds, refreshPanelAdminCache } from "./config/access.js";
 import { getStartNotifyGroupRef, normalizePublicHandle, notifyStartGroup } from "./features/startNotify.js";
 import { formatDiscoverCaption, explorerMarkup, registerExplorerCallbacks } from "./features/explorer.js";
 import { buildCodeHomeReplyKeyboard, matchCodeHomeAction } from "./config/homeMenu.js";
@@ -263,6 +268,41 @@ async function getLang(ctx: MyContext): Promise<Language> {
   if (!tgId) return "en";
   const u = await getUserByTelegramId(tgId);
   return langFromDb(u?.language ?? "en");
+}
+
+async function notifyAdminsOfReport(
+  ctx: MyContext,
+  params: { reporterId: number; targetId: number; reason: string }
+) {
+  const [reporter, target, targetProfile] = await Promise.all([
+    getUserById(params.reporterId),
+    getUserById(params.targetId),
+    getProfile(params.targetId),
+  ]);
+  if (!reporter || !target) return;
+  for (const adminTelegramId of panelAdminTelegramIds()) {
+    const adminUser = await getUserByTelegramId(adminTelegramId);
+    const adminLang = langFromDb(adminUser?.language ?? "en");
+    await ctx.api
+      .sendMessage(
+        adminTelegramId,
+        tf(adminLang, "admin.reportInstant", {
+          targetId: target.id,
+          targetTg: target.telegram_id,
+          targetUsername: target.username ?? "—",
+          targetName: targetProfile?.display_name ?? "—",
+          targetCity: targetProfile?.city ?? "—",
+          reporterId: reporter.id,
+          reporterTg: reporter.telegram_id,
+          reporterUsername: reporter.username ?? "—",
+          reason: params.reason === "user_reported" ? t(adminLang, "admin.reportReason.userReported") : params.reason,
+        }),
+        {
+          reply_markup: buildAdminReportActionsKeyboard(adminLang, params.reporterId, params.targetId),
+        }
+      )
+      .catch(() => {});
+  }
 }
 
 async function isBotEnabled(): Promise<boolean> {
@@ -900,6 +940,14 @@ function formatFilterList(lang: Language, values: string[] | undefined, emptyKey
   return values.length > 2 ? `${preview} +${values.length - 2}` : preview;
 }
 
+function hasFilterText(value: string | null | undefined): boolean {
+  return Boolean(value?.trim());
+}
+
+function hasFilterList(values: string[] | undefined): boolean {
+  return Boolean(values?.length);
+}
+
 function discoverActivityDays(filter: DiscoverFilterPayload["recentActivity"]): number | null {
   if (filter === "1") return 1;
   if (filter === "7") return 7;
@@ -993,23 +1041,52 @@ function discoverFilterKeyboard(lang: Language, filters: DiscoverFilterPayload) 
         : filters.recentActivity === "30"
           ? "discover.filter.recent.30"
           : "discover.filter.recent.any";
-  return new InlineKeyboard()
+  const kb = new InlineKeyboard()
     .text(`${filters.sameCity ? on : off} · ${t(lang, "discover.filter.city")}`, "df:city")
     .row()
     .text(`${filters.sameCountry ? on : off} · ${t(lang, "discover.filter.country")}`, "df:country")
-    .row()
-    .text(`${t(lang, "discover.filter.country.pick")} · ${formatFilterValue(lang, filters.country, "discover.filter.none")}`, "df:setcountry")
-    .row()
-    .text(`${t(lang, "discover.filter.cities.include")} · ${formatFilterList(lang, filters.includeCities, "discover.filter.none")}`, "df:addcity")
-    .row()
-    .text(`${t(lang, "discover.filter.cities.exclude")} · ${formatFilterList(lang, filters.excludeCities, "discover.filter.none")}`, "df:excity")
-    .row()
-    .text(`${t(lang, "discover.filter.countries.exclude")} · ${formatFilterList(lang, filters.excludeCountries, "discover.filter.none")}`, "df:excountry")
-    .row()
-    .text(`${filters.verifiedOnly ? on : off} · ${t(lang, "discover.filter.verified")}`, "df:verified")
+    .row();
+  const hasCountry = hasFilterText(filters.country);
+  kb.text(`${hasCountry ? on : off} · ${t(lang, "discover.filter.country.pick")}`, "df:setcountry").row();
+  if (hasCountry) {
+    kb.text(
+      `${t(lang, "discover.filter.country.pick")} · ${formatFilterValue(lang, filters.country, "discover.filter.none")}`,
+      "df:setcountry:edit"
+    ).row();
+  }
+  const hasIncludeCities = hasFilterList(filters.includeCities);
+  kb.text(`${hasIncludeCities ? on : off} · ${t(lang, "discover.filter.cities.include")}`, "df:addcity").row();
+  if (hasIncludeCities) {
+    kb.text(
+      `${t(lang, "discover.filter.cities.include")} · ${formatFilterList(lang, filters.includeCities, "discover.filter.none")}`,
+      "df:addcity:edit"
+    ).row();
+  }
+  const hasExcludeCities = hasFilterList(filters.excludeCities);
+  kb.text(`${hasExcludeCities ? on : off} · ${t(lang, "discover.filter.cities.exclude")}`, "df:excity").row();
+  if (hasExcludeCities) {
+    kb.text(
+      `${t(lang, "discover.filter.cities.exclude")} · ${formatFilterList(lang, filters.excludeCities, "discover.filter.none")}`,
+      "df:excity:edit"
+    ).row();
+  }
+  const hasExcludeCountries = hasFilterList(filters.excludeCountries);
+  kb.text(`${hasExcludeCountries ? on : off} · ${t(lang, "discover.filter.countries.exclude")}`, "df:excountry").row();
+  if (hasExcludeCountries) {
+    kb.text(
+      `${t(lang, "discover.filter.countries.exclude")} · ${formatFilterList(lang, filters.excludeCountries, "discover.filter.none")}`,
+      "df:excountry:edit"
+    ).row();
+  }
+  kb.text(`${filters.verifiedOnly ? on : off} · ${t(lang, "discover.filter.verified")}`, "df:verified")
     .text(`${filters.photoOnly ? on : off} · ${t(lang, "discover.filter.photos")}`, "df:photos")
     .row()
-    .text(ageKey ? t(lang, ageKey) : tf(lang, "discover.filter.age.custom", { min: filters.ageMin ?? 18, max: filters.ageMax ?? 99 }), "df:age")
+    .text(
+      ageKey
+        ? t(lang, ageKey)
+        : tf(lang, "discover.filter.age.custom", { min: filters.ageMin ?? 18, max: filters.ageMax ?? 99 }),
+      "df:age"
+    )
     .text(t(lang, "discover.filter.age.edit"), "df:agecustom")
     .row()
     .text(t(lang, genderKey), "df:gender")
@@ -1019,15 +1096,22 @@ function discoverFilterKeyboard(lang: Language, filters: DiscoverFilterPayload) 
     .text(t(lang, radiusKey), "df:radius")
     .row()
     .text(t(lang, recentKey), "df:recent")
-    .row()
-    .text(`${t(lang, "discover.filter.keyword")} · ${formatFilterValue(lang, filters.keyword, "discover.filter.none")}`, "df:keyword")
-    .row()
-    .text(`${t(lang, "discover.filter.interests")} · ${formatFilterList(lang, filters.interests, "discover.filter.none")}`, "df:interests")
+    .row();
+  const hasKeyword = hasFilterText(filters.keyword);
+  kb.text(`${hasKeyword ? on : off} · ${t(lang, "discover.filter.keyword")}`, "df:keyword").row();
+  if (hasKeyword) {
+    kb.text(
+      `${t(lang, "discover.filter.keyword")} · ${formatFilterValue(lang, filters.keyword, "discover.filter.none")}`,
+      "df:keyword:edit"
+    ).row();
+  }
+  kb.text(`${t(lang, "discover.filter.interests")} · ${formatFilterList(lang, filters.interests, "discover.filter.none")}`, "df:interests")
     .row()
     .text(t(lang, "discover.filter.start"), "df:start")
     .row()
     .text(t(lang, "discover.filter.reset"), "df:reset")
     .text(t(lang, "discover.filter.cancel"), "df:cancel");
+  return kb;
 }
 
 async function discoverInterestKeyboard(lang: Language, selected: string[]) {
@@ -1069,6 +1153,21 @@ async function replyDiscoverFilterView(ctx: MyContext, lang: Language, filters: 
 async function saveAndEditDiscoverFilters(ctx: MyContext, userId: number, lang: Language, filters: DiscoverFilterPayload) {
   await setSession(userId, { state: "discover_filter", payload: filters });
   await editDiscoverFilterView(ctx, lang, filters);
+}
+
+async function promptDiscoverFilterInput(
+  ctx: MyContext,
+  userId: number,
+  lang: Language,
+  filters: DiscoverFilterPayload,
+  field: DiscoverFilterInputField
+) {
+  await setSession(userId, {
+    state: "discover_filter_input",
+    payload: { filters: trimFilterUiState(filters), field },
+  });
+  await ctx.answerCallbackQuery();
+  await ctx.reply(discoverFilterPrompt(lang, field));
 }
 
 async function launchDiscoverFilters(ctx: MyContext, userId: number) {
@@ -1594,34 +1693,12 @@ export async function createBot() {
         await ctx.reply(t(lang, "admin.userNotFound"));
         return;
       }
-      const targetProfile = await getProfile(target.id);
-      const userKb = new InlineKeyboard()
-        .text(t(lang, "admin.resetNopes"), `adm:rnopes:${target.id}`)
-        .row()
-        .text(t(lang, target.is_banned ? "admin.unban" : "admin.ban"), `adm:usrban:${target.id}:${target.is_banned ? 0 : 1}`)
-        .row()
-        .text(
-          t(lang, target.badge_verified ? "admin.badgeVerifiedOff" : "admin.badgeVerifiedOn"),
-          `adm:ubv:${target.id}:${target.badge_verified ? 0 : 1}`
-        )
-        .text(
-          t(lang, target.badge_vip ? "admin.badgeVipOff" : "admin.badgeVipOn"),
-          `adm:ubp:${target.id}:${target.badge_vip ? 0 : 1}`
-        );
-      await ctx.reply(
-        tf(lang, "admin.userLine", {
-          id: target.id,
-          tg: target.telegram_id,
-          username: target.username ?? "—",
-          banned: target.is_banned ? (lang === "fa" ? "بله" : "Yes") : lang === "fa" ? "خیر" : "No",
-          language: target.language === "fa" ? "فارسی" : "English",
-          diamonds: target.diamond_balance,
-          verified: target.badge_verified ? (lang === "fa" ? "بله" : "Yes") : lang === "fa" ? "خیر" : "No",
-          vip: target.badge_vip ? (lang === "fa" ? "بله" : "Yes") : lang === "fa" ? "خیر" : "No",
-          visible: targetProfile?.visibility === false ? (lang === "fa" ? "خیر" : "No") : lang === "fa" ? "بله" : "Yes",
-        }),
-        { reply_markup: userKb }
-      );
+      const card = await buildAdminUserCard(lang, target.id);
+      if (!card) {
+        await ctx.reply(t(lang, "admin.userNotFound"));
+        return;
+      }
+      await ctx.reply(card.text, { reply_markup: card.replyMarkup });
       return;
     }
 
@@ -1640,6 +1717,7 @@ export async function createBot() {
       s.state === "admin_find" ||
       s.state === "admin_config_wait" ||
       s.state === "admin_diamond_wait" ||
+      s.state === "admin_profile_edit" ||
       s.state === "admin_msg_edit" ||
       s.state === "admin_send_user" ||
       s.state === "admin_referral_setting_wait" ||
@@ -2104,6 +2182,7 @@ export async function createBot() {
       s.state === "admin_find" ||
       s.state === "admin_config_wait" ||
       s.state === "admin_diamond_wait" ||
+      s.state === "admin_profile_edit" ||
       s.state === "admin_msg_edit" ||
       s.state === "admin_send_user" ||
       s.state === "admin_referral_setting_wait" ||
@@ -2332,12 +2411,22 @@ export async function createBot() {
     const s = await getSession(u.id);
     const lang = await getLang(ctx);
     if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
-    await setSession(u.id, {
-      state: "discover_filter_input",
-      payload: { filters: trimFilterUiState(s.payload), field: "country" },
-    });
-    await ctx.answerCallbackQuery();
-    await ctx.reply(discoverFilterPrompt(lang, "country"));
+    if (hasFilterText(s.payload.country)) {
+      const filters = { ...trimFilterUiState(s.payload), country: null };
+      await ctx.answerCallbackQuery();
+      await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+      return;
+    }
+    await promptDiscoverFilterInput(ctx, u.id, lang, s.payload, "country");
+  });
+
+  bot.callbackQuery("df:setcountry:edit", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    const lang = await getLang(ctx);
+    if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
+    await promptDiscoverFilterInput(ctx, u.id, lang, s.payload, "country");
   });
 
   bot.callbackQuery("df:addcity", async (ctx) => {
@@ -2346,12 +2435,22 @@ export async function createBot() {
     const s = await getSession(u.id);
     const lang = await getLang(ctx);
     if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
-    await setSession(u.id, {
-      state: "discover_filter_input",
-      payload: { filters: trimFilterUiState(s.payload), field: "include_cities" },
-    });
-    await ctx.answerCallbackQuery();
-    await ctx.reply(discoverFilterPrompt(lang, "include_cities"));
+    if (hasFilterList(s.payload.includeCities)) {
+      const filters = { ...trimFilterUiState(s.payload), includeCities: [] };
+      await ctx.answerCallbackQuery();
+      await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+      return;
+    }
+    await promptDiscoverFilterInput(ctx, u.id, lang, s.payload, "include_cities");
+  });
+
+  bot.callbackQuery("df:addcity:edit", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    const lang = await getLang(ctx);
+    if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
+    await promptDiscoverFilterInput(ctx, u.id, lang, s.payload, "include_cities");
   });
 
   bot.callbackQuery("df:excountry", async (ctx) => {
@@ -2360,12 +2459,22 @@ export async function createBot() {
     const s = await getSession(u.id);
     const lang = await getLang(ctx);
     if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
-    await setSession(u.id, {
-      state: "discover_filter_input",
-      payload: { filters: trimFilterUiState(s.payload), field: "exclude_countries" },
-    });
-    await ctx.answerCallbackQuery();
-    await ctx.reply(discoverFilterPrompt(lang, "exclude_countries"));
+    if (hasFilterList(s.payload.excludeCountries)) {
+      const filters = { ...trimFilterUiState(s.payload), excludeCountries: [] };
+      await ctx.answerCallbackQuery();
+      await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+      return;
+    }
+    await promptDiscoverFilterInput(ctx, u.id, lang, s.payload, "exclude_countries");
+  });
+
+  bot.callbackQuery("df:excountry:edit", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    const lang = await getLang(ctx);
+    if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
+    await promptDiscoverFilterInput(ctx, u.id, lang, s.payload, "exclude_countries");
   });
 
   bot.callbackQuery("df:excity", async (ctx) => {
@@ -2374,12 +2483,22 @@ export async function createBot() {
     const s = await getSession(u.id);
     const lang = await getLang(ctx);
     if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
-    await setSession(u.id, {
-      state: "discover_filter_input",
-      payload: { filters: trimFilterUiState(s.payload), field: "exclude_cities" },
-    });
-    await ctx.answerCallbackQuery();
-    await ctx.reply(discoverFilterPrompt(lang, "exclude_cities"));
+    if (hasFilterList(s.payload.excludeCities)) {
+      const filters = { ...trimFilterUiState(s.payload), excludeCities: [] };
+      await ctx.answerCallbackQuery();
+      await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+      return;
+    }
+    await promptDiscoverFilterInput(ctx, u.id, lang, s.payload, "exclude_cities");
+  });
+
+  bot.callbackQuery("df:excity:edit", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    const lang = await getLang(ctx);
+    if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
+    await promptDiscoverFilterInput(ctx, u.id, lang, s.payload, "exclude_cities");
   });
 
   bot.callbackQuery("df:age", async (ctx) => {
@@ -2467,12 +2586,22 @@ export async function createBot() {
     const s = await getSession(u.id);
     const lang = await getLang(ctx);
     if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
-    await setSession(u.id, {
-      state: "discover_filter_input",
-      payload: { filters: trimFilterUiState(s.payload), field: "keyword" },
-    });
-    await ctx.answerCallbackQuery();
-    await ctx.reply(discoverFilterPrompt(lang, "keyword"));
+    if (hasFilterText(s.payload.keyword)) {
+      const filters = { ...trimFilterUiState(s.payload), keyword: "" };
+      await ctx.answerCallbackQuery();
+      await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+      return;
+    }
+    await promptDiscoverFilterInput(ctx, u.id, lang, s.payload, "keyword");
+  });
+
+  bot.callbackQuery("df:keyword:edit", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    const lang = await getLang(ctx);
+    if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
+    await promptDiscoverFilterInput(ctx, u.id, lang, s.payload, "keyword");
   });
 
   bot.callbackQuery("df:interests", async (ctx) => {
@@ -2787,8 +2916,16 @@ export async function createBot() {
     onReport: async (ctx) => {
       const x = await assertDiscoverContext(ctx);
       if (!x) return void (await ctx.answerCallbackQuery());
-      await ctx.answerCallbackQuery();
+      await ctx.answerCallbackQuery({
+        text: t(x.lang, "discover.report.sent"),
+        show_alert: false,
+      });
       await createReport({ reporterId: x.u.id, targetId: x.targetId, reason: "user_reported" });
+      await notifyAdminsOfReport(ctx, {
+        reporterId: x.u.id,
+        targetId: x.targetId,
+        reason: "user_reported",
+      });
       await setSession(x.u.id, {
         state: "discover",
         payload: { ...x.s.payload, idx: x.s.payload.idx + 1, sub: "main" },
@@ -3148,6 +3285,7 @@ export async function createBot() {
       s.state === "admin_find" ||
       s.state === "admin_config_wait" ||
       s.state === "admin_diamond_wait" ||
+      s.state === "admin_profile_edit" ||
       s.state === "admin_msg_edit" ||
       s.state === "admin_send_user" ||
       s.state === "admin_referral_setting_wait" ||

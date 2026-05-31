@@ -23,7 +23,7 @@ import {
   normalizePublicHandle,
 } from "../features/startNotify.js";
 import { logger } from "../logger.js";
-import type { Language, MyContext, SessionState } from "../types.js";
+import type { AdminProfileEditField, Language, MyContext, SessionState } from "../types.js";
 import { t, tf } from "../i18n/index.js";
 import {
   adjustDiamondBalance,
@@ -35,6 +35,7 @@ import {
   getAdminDashboardStats,
   adminGenderDistribution,
   adminOrientationDistribution,
+  getProfile,
   getUserByTelegramId,
   getUserById,
   getTelegramIdByUserId,
@@ -53,6 +54,7 @@ import {
   getSystemSettingNumber,
   getSystemSettingString,
   setSystemSetting,
+  upsertProfile,
   updateUserBadges,
 } from "../db/repo.js";
 
@@ -75,6 +77,7 @@ const adm = {
   dismiss: (reporterId: number, targetId: number) => `adm:d:${reporterId}:${targetId}`,
   ban: (reporterId: number, targetId: number) => `adm:b:${reporterId}:${targetId}`,
   hide: (reporterId: number, targetId: number) => `adm:h:${reporterId}:${targetId}`,
+  reportEdit: (reporterId: number, targetId: number) => `adm:re:${reporterId}:${targetId}`,
   broadcast: "adm:bc",
   find: "adm:fn",
   logs: "adm:logs",
@@ -110,6 +113,11 @@ const adm = {
   joins: "adm:joins",
   joinAdd: "adm:joins:add",
   joinClear: "adm:joins:clear",
+  userEditMenu: (targetId: number, reporterId = 0) => `adm:uem:${targetId}:${reporterId}`,
+  userEditField: (targetId: number, reporterId: number, field: AdminProfileEditField) =>
+    `adm:uef:${targetId}:${reporterId}:${field}`,
+  userVisibility: (targetId: number, visible: 0 | 1, reporterId = 0) =>
+    `adm:uv:${targetId}:${visible}:${reporterId}`,
   userBadgeVerified: (userId: number, enabled: 0 | 1) => `adm:ubv:${userId}:${enabled}`,
   userBadgeVip: (userId: number, enabled: 0 | 1) => `adm:ubp:${userId}:${enabled}`,
   startNotify: "adm:sn",
@@ -128,6 +136,152 @@ const CFG_SECTIONS = [
 ] as const;
 
 const LOG_PAGE = 12;
+
+const ADMIN_PROFILE_FIELDS: AdminProfileEditField[] = [
+  "display_name",
+  "age",
+  "city",
+  "country",
+  "bio",
+];
+
+function adminBoolLabel(lang: Language, value: boolean): string {
+  if (value) return lang === "fa" ? "بله" : "Yes";
+  return lang === "fa" ? "خیر" : "No";
+}
+
+function reportReasonLabel(lang: Language, reason: string): string {
+  if (!reason.trim()) return "—";
+  if (reason === "user_reported") return t(lang, "admin.reportReason.userReported");
+  return reason;
+}
+
+function trimPreview(value: string, limit = 90): string {
+  const clean = value.trim();
+  if (!clean) return "—";
+  return clean.length > limit ? `${clean.slice(0, limit - 1)}...` : clean;
+}
+
+function adminProfileEditPrompt(lang: Language, field: AdminProfileEditField): string {
+  return t(lang, `admin.profileEditPrompt.${field}`);
+}
+
+function adminProfileEditKeyboard(
+  lang: Language,
+  targetUserId: number,
+  reporterId: number,
+  visible: boolean
+): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  kb.text(t(lang, "admin.profileEditField.display_name"), adm.userEditField(targetUserId, reporterId, "display_name"))
+    .text(t(lang, "admin.profileEditField.age"), adm.userEditField(targetUserId, reporterId, "age"))
+    .row()
+    .text(t(lang, "admin.profileEditField.city"), adm.userEditField(targetUserId, reporterId, "city"))
+    .text(t(lang, "admin.profileEditField.country"), adm.userEditField(targetUserId, reporterId, "country"))
+    .row()
+    .text(t(lang, "admin.profileEditField.bio"), adm.userEditField(targetUserId, reporterId, "bio"))
+    .text(
+      t(lang, visible ? "admin.profileVisibilityHide" : "admin.profileVisibilityShow"),
+      adm.userVisibility(targetUserId, visible ? 0 : 1, reporterId)
+    )
+    .row();
+  if (reporterId > 0) {
+    kb.text(t(lang, "admin.ban"), adm.ban(reporterId, targetUserId))
+      .text(t(lang, "admin.ignore"), adm.dismiss(reporterId, targetUserId))
+      .row();
+  }
+  kb.text(t(lang, "admin.back"), adm.root);
+  return kb;
+}
+
+function adminReportActionsKeyboard(lang: Language, reporterId: number, targetId: number): InlineKeyboard {
+  return new InlineKeyboard()
+    .text(t(lang, "admin.editProfile"), adm.reportEdit(reporterId, targetId))
+    .text(t(lang, "admin.ban"), adm.ban(reporterId, targetId))
+    .row()
+    .text(t(lang, "admin.ignore"), adm.dismiss(reporterId, targetId))
+    .text(t(lang, "admin.hide"), adm.hide(reporterId, targetId));
+}
+
+export function buildAdminReportActionsKeyboard(
+  lang: Language,
+  reporterId: number,
+  targetId: number
+): InlineKeyboard {
+  return adminReportActionsKeyboard(lang, reporterId, targetId);
+}
+
+export async function buildAdminUserCard(
+  lang: Language,
+  targetUserId: number,
+  reporterId = 0
+): Promise<{ text: string; replyMarkup: InlineKeyboard } | null> {
+  const [target, profile] = await Promise.all([getUserById(targetUserId), getProfile(targetUserId)]);
+  if (!target) return null;
+  const text = `${tf(lang, "admin.userLine", {
+    id: target.id,
+    tg: target.telegram_id,
+    username: target.username ?? "—",
+    banned: adminBoolLabel(lang, target.is_banned),
+    language: target.language === "fa" ? "فارسی" : "English",
+    diamonds: target.diamond_balance,
+    verified: adminBoolLabel(lang, target.badge_verified),
+    vip: adminBoolLabel(lang, target.badge_vip),
+    visible: adminBoolLabel(lang, profile?.visibility !== false),
+  })}\n\n${tf(lang, "admin.profileSummary", {
+    name: profile?.display_name ?? "—",
+    age: profile?.age ?? "—",
+    city: profile?.city ?? "—",
+    country: profile?.preferences.country ?? "—",
+    bio: trimPreview(profile?.bio ?? ""),
+  })}`;
+  const replyMarkup = new InlineKeyboard()
+    .text(t(lang, "admin.editProfile"), adm.userEditMenu(targetUserId, reporterId))
+    .row()
+    .text(t(lang, target.is_banned ? "admin.unban" : "admin.ban"), `adm:usrban:${target.id}:${target.is_banned ? 0 : 1}`)
+    .text(
+      t(lang, profile?.visibility === false ? "admin.profileVisibilityShow" : "admin.profileVisibilityHide"),
+      adm.userVisibility(targetUserId, profile?.visibility === false ? 1 : 0, reporterId)
+    )
+    .row()
+    .text(t(lang, "admin.resetNopes"), `adm:rnopes:${target.id}`)
+    .row()
+    .text(
+      t(lang, target.badge_verified ? "admin.badgeVerifiedOff" : "admin.badgeVerifiedOn"),
+      `adm:ubv:${target.id}:${target.badge_verified ? 0 : 1}`
+    )
+    .text(
+      t(lang, target.badge_vip ? "admin.badgeVipOff" : "admin.badgeVipOn"),
+      `adm:ubp:${target.id}:${target.badge_vip ? 0 : 1}`
+    );
+  if (reporterId > 0) {
+    replyMarkup.row().text(t(lang, "admin.ignore"), adm.dismiss(reporterId, targetUserId));
+  }
+  return { text, replyMarkup };
+}
+
+async function showAdminProfileEditMenu(
+  ctx: MyContext,
+  lang: Language,
+  targetUserId: number,
+  reporterId = 0
+) {
+  const profile = await getProfile(targetUserId);
+  if (!profile) {
+    await ctx.reply(t(lang, "admin.profileMissing"));
+    return;
+  }
+  await ctx.reply(
+    `${t(lang, "admin.profileEditMenu")}\n\n${tf(lang, "admin.profileSummary", {
+      name: profile.display_name,
+      age: profile.age,
+      city: profile.city,
+      country: profile.preferences.country ?? "—",
+      bio: trimPreview(profile.bio),
+    })}`,
+    { reply_markup: adminProfileEditKeyboard(lang, targetUserId, reporterId, profile.visibility) }
+  );
+}
 
 function adminValueLabel(lang: Language, value: string): string {
   const key = value.trim().toLowerCase();
@@ -388,6 +542,71 @@ export async function tryHandleAdminFollowupMessage(
           : labelForLang(dm.deducted, ulang).replace("{n}", String(delta));
       await ctx.api.sendMessage(notifyTg, body).catch(() => {});
     }
+    return true;
+  }
+
+  if (s.state === "admin_profile_edit") {
+    const payload = s.payload as { targetUserId: number; reporterId?: number; field: AdminProfileEditField };
+    if (txt === "/cancel") {
+      await setSession(u.id, { state: "idle", payload: {} });
+      await ctx.reply(t(lang, "admin.broadcastCancelled"));
+      return true;
+    }
+    const profile = await getProfile(payload.targetUserId);
+    if (!profile) {
+      await setSession(u.id, { state: "idle", payload: {} });
+      await ctx.reply(t(lang, "admin.profileMissing"));
+      return true;
+    }
+    const next = {
+      ...profile,
+      preferences: { ...profile.preferences },
+    };
+    if (payload.field === "display_name") {
+      const value = txt.slice(0, 32).trim();
+      if (!value) {
+        await ctx.reply(t(lang, "admin.profileEditInvalid.display_name"));
+        await ctx.reply(adminProfileEditPrompt(lang, payload.field));
+        return true;
+      }
+      next.display_name = value;
+    } else if (payload.field === "age") {
+      const value = Number(txt.trim());
+      if (!Number.isInteger(value) || value < 18 || value > 99) {
+        await ctx.reply(t(lang, "admin.profileEditInvalid.age"));
+        await ctx.reply(adminProfileEditPrompt(lang, payload.field));
+        return true;
+      }
+      next.age = value;
+    } else if (payload.field === "city") {
+      const value = txt.slice(0, 64).trim();
+      if (!value) {
+        await ctx.reply(t(lang, "admin.profileEditInvalid.city"));
+        await ctx.reply(adminProfileEditPrompt(lang, payload.field));
+        return true;
+      }
+      next.city = value;
+    } else if (payload.field === "country") {
+      const value = txt.slice(0, 64).trim();
+      if (value === "-") {
+        delete next.preferences.country;
+        delete next.preferences.province_key;
+      } else if (!value) {
+        await ctx.reply(t(lang, "admin.profileEditInvalid.country"));
+        await ctx.reply(adminProfileEditPrompt(lang, payload.field));
+        return true;
+      } else {
+        next.preferences.country = value;
+        next.preferences.province_key = null;
+      }
+    } else if (payload.field === "bio") {
+      next.bio = txt === "-" ? "" : txt.slice(0, 300).trim();
+    }
+    const { user_id: _ignored, ...rest } = next;
+    await upsertProfile(payload.targetUserId, rest);
+    await setSession(u.id, { state: "idle", payload: {} });
+    await ctx.reply(t(lang, "admin.profileEditSaved"));
+    await showAdminProfileEditMenu(ctx, lang, payload.targetUserId, payload.reporterId ?? 0);
     return true;
   }
 
@@ -656,10 +875,12 @@ export function setupAdmin(bot: Bot<MyContext>) {
       lines += `${tf(lang, "admin.reportRow", {
         target: r.target_id,
         reporter: r.reporter_id,
-        reason: r.reason || "—",
+        reason: reportReasonLabel(lang, r.reason),
       })}\n`;
-      kb.text(t(lang, "admin.dismiss"), adm.dismiss(r.reporter_id, r.target_id))
+      kb.text(t(lang, "admin.editProfile"), adm.reportEdit(r.reporter_id, r.target_id))
         .text(t(lang, "admin.ban"), adm.ban(r.reporter_id, r.target_id))
+        .row()
+        .text(t(lang, "admin.ignore"), adm.dismiss(r.reporter_id, r.target_id))
         .text(t(lang, "admin.hide"), adm.hide(r.reporter_id, r.target_id))
         .row();
     }
@@ -684,7 +905,7 @@ export function setupAdmin(bot: Bot<MyContext>) {
       adminTelegramId: ctx.from!.id,
     });
     logger.info({ reporterId, targetId, admin: ctx.from!.id }, "admin_report_dismiss");
-    await ctx.reply(t(await resolveAdminLang(ctx.from?.id, ctx.from?.language_code), "admin.dismiss"));
+    await ctx.reply(t(await resolveAdminLang(ctx.from?.id, ctx.from?.language_code), "admin.ignore"));
   });
 
   bot.callbackQuery(/^adm:b:(\d+):(\d+)$/, async (ctx) => {
@@ -700,6 +921,15 @@ export function setupAdmin(bot: Bot<MyContext>) {
     });
     logger.warn({ targetId, admin: ctx.from!.id }, "admin_ban");
     await ctx.reply(t(await resolveAdminLang(ctx.from?.id, ctx.from?.language_code), "admin.ban"));
+  });
+
+  bot.callbackQuery(/^adm:re:(\d+):(\d+)$/, async (ctx) => {
+    if (!isPanelAdmin(ctx.from?.id)) return;
+    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+    const reporterId = Number(ctx.match?.[1]);
+    const targetId = Number(ctx.match?.[2]);
+    await ctx.answerCallbackQuery();
+    await showAdminProfileEditMenu(ctx, lang, targetId, reporterId);
   });
 
   bot.callbackQuery(/^adm:h:(\d+):(\d+)$/, async (ctx) => {
@@ -979,6 +1209,49 @@ export function setupAdmin(bot: Bot<MyContext>) {
       logger.info({ targetId, admin: ctx.from!.id }, "admin_unban");
       await ctx.reply(t(lang, "admin.unban"));
     }
+  });
+
+  bot.callbackQuery(/^adm:uem:(\d+):(\d+)$/, async (ctx) => {
+    if (!isPanelAdmin(ctx.from?.id)) return;
+    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+    const targetId = Number(ctx.match?.[1]);
+    const reporterId = Number(ctx.match?.[2] ?? 0);
+    await ctx.answerCallbackQuery();
+    await showAdminProfileEditMenu(ctx, lang, targetId, reporterId);
+  });
+
+  bot.callbackQuery(/^adm:uef:(\d+):(\d+):([a-z_]+)$/, async (ctx) => {
+    if (!isPanelAdmin(ctx.from?.id)) return;
+    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+    const targetId = Number(ctx.match?.[1]);
+    const reporterId = Number(ctx.match?.[2] ?? 0);
+    const field = String(ctx.match?.[3] ?? "") as AdminProfileEditField;
+    if (!ADMIN_PROFILE_FIELDS.includes(field)) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+    const me = await getUserByTelegramId(ctx.from!.id);
+    if (!me) return;
+    await ctx.answerCallbackQuery();
+    await setSession(me.id, {
+      state: "admin_profile_edit",
+      payload: { targetUserId: targetId, reporterId: reporterId || undefined, field },
+    });
+    await ctx.reply(adminProfileEditPrompt(lang, field));
+  });
+
+  bot.callbackQuery(/^adm:uv:(\d+):(0|1):(\d+)$/, async (ctx) => {
+    if (!isPanelAdmin(ctx.from?.id)) return;
+    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+    const targetId = Number(ctx.match?.[1]);
+    const visible = ctx.match?.[2] === "1";
+    const reporterId = Number(ctx.match?.[3] ?? 0);
+    await setProfileVisibility(targetId, visible);
+    await ctx.answerCallbackQuery({
+      text: t(lang, visible ? "admin.profileVisibilityShown" : "admin.profileVisibilityHidden"),
+      show_alert: false,
+    });
+    await showAdminProfileEditMenu(ctx, lang, targetId, reporterId);
   });
 
   bot.callbackQuery(adm.sendUser, async (ctx) => {
