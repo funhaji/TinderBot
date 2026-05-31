@@ -927,7 +927,7 @@ function discoverRadiusMeters(
 }
 
 function trimFilterUiState(filters: DiscoverFilterPayload): DiscoverFilterPayload {
-  return { ...filters, screen: "main" };
+  return { ...filters, screen: filters.screen ?? "main" };
 }
 
 function formatFilterValue(lang: Language, value: string | null | undefined, emptyKey: string): string {
@@ -986,24 +986,28 @@ function parseAgeRangeInput(text: string): { min: number; max: number } | null {
   return { min, max };
 }
 
-function discoverFilterKeyboard(lang: Language, filters: DiscoverFilterPayload) {
-  const on = lang === "fa" ? "روشن" : "On";
-  const off = lang === "fa" ? "خاموش" : "Off";
+function discoverAgeLabel(lang: Language, filters: DiscoverFilterPayload): string {
   const ageKey =
     filters.ageMin != null || filters.ageMax != null
       ? null
       : filters.age === "profile"
-      ? "discover.filter.age.profile"
-      : filters.age === "near"
-        ? "discover.filter.age.near"
-        : filters.age === "18_25"
-          ? "discover.filter.age.18_25"
-          : filters.age === "26_35"
-            ? "discover.filter.age.26_35"
-            : filters.age === "36_plus"
-              ? "discover.filter.age.36_plus"
-              : "discover.filter.age.any";
-  const genderKey =
+        ? "discover.filter.age.profile"
+        : filters.age === "near"
+          ? "discover.filter.age.near"
+          : filters.age === "18_25"
+            ? "discover.filter.age.18_25"
+            : filters.age === "26_35"
+              ? "discover.filter.age.26_35"
+              : filters.age === "36_plus"
+                ? "discover.filter.age.36_plus"
+                : "discover.filter.age.any";
+  return ageKey
+    ? t(lang, ageKey)
+    : tf(lang, "discover.filter.age.custom", { min: filters.ageMin ?? 18, max: filters.ageMax ?? 99 });
+}
+
+function discoverGenderLabel(lang: Language, filters: DiscoverFilterPayload): string {
+  const key =
     filters.gender === "profile"
       ? "discover.filter.gender.profile"
       : filters.gender === "male"
@@ -1013,7 +1017,11 @@ function discoverFilterKeyboard(lang: Language, filters: DiscoverFilterPayload) 
           : filters.gender === "other"
             ? "discover.filter.gender.other"
             : "discover.filter.gender.any";
-  const lookingForKey =
+  return t(lang, key);
+}
+
+function discoverLookingForLabel(lang: Language, filters: DiscoverFilterPayload): string {
+  const key =
     filters.lookingFor === "compatible"
       ? "discover.filter.looking.compatible"
       : filters.lookingFor === "friends"
@@ -1021,7 +1029,11 @@ function discoverFilterKeyboard(lang: Language, filters: DiscoverFilterPayload) 
         : filters.lookingFor === "dating"
           ? "discover.filter.looking.dating"
           : "discover.filter.looking.any";
-  const radiusKey =
+  return t(lang, key);
+}
+
+function discoverRadiusLabel(lang: Language, filters: DiscoverFilterPayload): string {
+  const key =
     filters.radius === "profile"
       ? "discover.filter.radius.profile"
       : filters.radius === "10"
@@ -1033,7 +1045,11 @@ function discoverFilterKeyboard(lang: Language, filters: DiscoverFilterPayload) 
             : filters.radius === "100"
               ? "discover.filter.radius.100"
               : "discover.filter.radius.any";
-  const recentKey =
+  return t(lang, key);
+}
+
+function discoverRecentLabel(lang: Language, filters: DiscoverFilterPayload): string {
+  const key =
     filters.recentActivity === "1"
       ? "discover.filter.recent.1"
       : filters.recentActivity === "7"
@@ -1041,76 +1057,120 @@ function discoverFilterKeyboard(lang: Language, filters: DiscoverFilterPayload) 
         : filters.recentActivity === "30"
           ? "discover.filter.recent.30"
           : "discover.filter.recent.any";
-  const kb = new InlineKeyboard()
-    .text(`${filters.sameCity ? on : off} · ${t(lang, "discover.filter.city")}`, "df:city")
-    .row()
-    .text(`${filters.sameCountry ? on : off} · ${t(lang, "discover.filter.country")}`, "df:country")
-    .row();
-  const hasCountry = hasFilterText(filters.country);
-  kb.text(`${hasCountry ? on : off} · ${t(lang, "discover.filter.country.pick")}`, "df:setcountry").row();
-  if (hasCountry) {
-    kb.text(
-      `${t(lang, "discover.filter.country.pick")} · ${formatFilterValue(lang, filters.country, "discover.filter.none")}`,
-      "df:setcountry:edit"
-    ).row();
+  return t(lang, key);
+}
+
+function discoverSectionSummary(lang: Language, filters: DiscoverFilterPayload, screen: "who" | "where" | "quality" | "interests"): string {
+  if (screen === "who") {
+    return [discoverAgeLabel(lang, filters), discoverGenderLabel(lang, filters), discoverLookingForLabel(lang, filters)]
+      .map((s) => s.replace(/^.*?:\s*/, ""))
+      .join(" • ");
   }
-  const hasIncludeCities = hasFilterList(filters.includeCities);
-  kb.text(`${hasIncludeCities ? on : off} · ${t(lang, "discover.filter.cities.include")}`, "df:addcity").row();
-  if (hasIncludeCities) {
-    kb.text(
-      `${t(lang, "discover.filter.cities.include")} · ${formatFilterList(lang, filters.includeCities, "discover.filter.none")}`,
-      "df:addcity:edit"
-    ).row();
+  if (screen === "where") {
+    const parts: string[] = [];
+    if (filters.sameCity) parts.push(t(lang, "discover.filter.city"));
+    if (filters.sameCountry) parts.push(t(lang, "discover.filter.country"));
+    if (hasFilterText(filters.country)) parts.push(formatFilterValue(lang, filters.country, "discover.filter.none"));
+    if (hasFilterList(filters.includeCities)) parts.push(`${t(lang, "discover.filter.cities.include")}: ${filters.includeCities!.length}`);
+    if (hasFilterList(filters.excludeCities)) parts.push(`${t(lang, "discover.filter.cities.exclude")}: ${filters.excludeCities!.length}`);
+    if (hasFilterList(filters.excludeCountries)) parts.push(`${t(lang, "discover.filter.countries.exclude")}: ${filters.excludeCountries!.length}`);
+    parts.push(discoverRadiusLabel(lang, filters).replace(/^.*?:\s*/, ""));
+    return parts.join(" • ");
   }
-  const hasExcludeCities = hasFilterList(filters.excludeCities);
-  kb.text(`${hasExcludeCities ? on : off} · ${t(lang, "discover.filter.cities.exclude")}`, "df:excity").row();
-  if (hasExcludeCities) {
-    kb.text(
-      `${t(lang, "discover.filter.cities.exclude")} · ${formatFilterList(lang, filters.excludeCities, "discover.filter.none")}`,
-      "df:excity:edit"
-    ).row();
+  if (screen === "quality") {
+    const parts: string[] = [];
+    if (filters.verifiedOnly) parts.push(t(lang, "discover.filter.verified"));
+    if (filters.photoOnly) parts.push(t(lang, "discover.filter.photos"));
+    if (hasFilterText(filters.keyword)) parts.push(t(lang, "discover.filter.keyword"));
+    parts.push(discoverRecentLabel(lang, filters).replace(/^.*?:\s*/, ""));
+    return parts.join(" • ");
   }
-  const hasExcludeCountries = hasFilterList(filters.excludeCountries);
-  kb.text(`${hasExcludeCountries ? on : off} · ${t(lang, "discover.filter.countries.exclude")}`, "df:excountry").row();
-  if (hasExcludeCountries) {
-    kb.text(
-      `${t(lang, "discover.filter.countries.exclude")} · ${formatFilterList(lang, filters.excludeCountries, "discover.filter.none")}`,
-      "df:excountry:edit"
-    ).row();
+  if (filters.interests?.length) return tf(lang, "discover.filter.summary.selected", { n: filters.interests.length });
+  return t(lang, "discover.filter.none");
+}
+
+function discoverFilterKeyboard(lang: Language, filters: DiscoverFilterPayload) {
+  const on = lang === "fa" ? "روشن" : "On";
+  const off = lang === "fa" ? "خاموش" : "Off";
+  const screen = filters.screen ?? "main";
+  if (screen === "main") {
+    return new InlineKeyboard()
+      .text(`${t(lang, "discover.filter.section.who")} · ${discoverSectionSummary(lang, filters, "who")}`, "df:screen:who")
+      .row()
+      .text(`${t(lang, "discover.filter.section.where")} · ${discoverSectionSummary(lang, filters, "where")}`, "df:screen:where")
+      .row()
+      .text(`${t(lang, "discover.filter.section.quality")} · ${discoverSectionSummary(lang, filters, "quality")}`, "df:screen:quality")
+      .row()
+      .text(`${t(lang, "discover.filter.interests")} · ${discoverSectionSummary(lang, filters, "interests")}`, "df:screen:interests")
+      .row()
+      .text(t(lang, "discover.filter.start"), "df:start")
+      .row()
+      .text(t(lang, "discover.filter.reset"), "df:reset")
+      .text(t(lang, "discover.filter.cancel"), "df:cancel");
   }
-  kb.text(`${filters.verifiedOnly ? on : off} · ${t(lang, "discover.filter.verified")}`, "df:verified")
-    .text(`${filters.photoOnly ? on : off} · ${t(lang, "discover.filter.photos")}`, "df:photos")
-    .row()
-    .text(
-      ageKey
-        ? t(lang, ageKey)
-        : tf(lang, "discover.filter.age.custom", { min: filters.ageMin ?? 18, max: filters.ageMax ?? 99 }),
-      "df:age"
-    )
-    .text(t(lang, "discover.filter.age.edit"), "df:agecustom")
-    .row()
-    .text(t(lang, genderKey), "df:gender")
-    .row()
-    .text(t(lang, lookingForKey), "df:looking")
-    .row()
-    .text(t(lang, radiusKey), "df:radius")
-    .row()
-    .text(t(lang, recentKey), "df:recent")
-    .row();
-  const hasKeyword = hasFilterText(filters.keyword);
-  kb.text(`${hasKeyword ? on : off} · ${t(lang, "discover.filter.keyword")}`, "df:keyword").row();
-  if (hasKeyword) {
-    kb.text(
-      `${t(lang, "discover.filter.keyword")} · ${formatFilterValue(lang, filters.keyword, "discover.filter.none")}`,
-      "df:keyword:edit"
-    ).row();
+  const kb = new InlineKeyboard();
+  if (screen === "who") {
+    kb.text(discoverAgeLabel(lang, filters), "df:age")
+      .text(t(lang, "discover.filter.age.edit"), "df:agecustom")
+      .row()
+      .text(discoverGenderLabel(lang, filters), "df:gender")
+      .row()
+      .text(discoverLookingForLabel(lang, filters), "df:looking");
+  } else if (screen === "where") {
+    kb.text(`${filters.sameCity ? on : off} · ${t(lang, "discover.filter.city")}`, "df:city")
+      .row()
+      .text(`${filters.sameCountry ? on : off} · ${t(lang, "discover.filter.country")}`, "df:country")
+      .row()
+      .text(discoverRadiusLabel(lang, filters), "df:radius")
+      .row();
+    const hasCountry = hasFilterText(filters.country);
+    kb.text(`${hasCountry ? on : off} · ${t(lang, "discover.filter.country.pick")}`, "df:setcountry").row();
+    if (hasCountry) {
+      kb.text(
+        `${t(lang, "discover.filter.country.pick")} · ${formatFilterValue(lang, filters.country, "discover.filter.none")}`,
+        "df:setcountry:edit"
+      ).row();
+    }
+    const hasIncludeCities = hasFilterList(filters.includeCities);
+    kb.text(`${hasIncludeCities ? on : off} · ${t(lang, "discover.filter.cities.include")}`, "df:addcity").row();
+    if (hasIncludeCities) {
+      kb.text(
+        `${t(lang, "discover.filter.cities.include")} · ${formatFilterList(lang, filters.includeCities, "discover.filter.none")}`,
+        "df:addcity:edit"
+      ).row();
+    }
+    const hasExcludeCities = hasFilterList(filters.excludeCities);
+    kb.text(`${hasExcludeCities ? on : off} · ${t(lang, "discover.filter.cities.exclude")}`, "df:excity").row();
+    if (hasExcludeCities) {
+      kb.text(
+        `${t(lang, "discover.filter.cities.exclude")} · ${formatFilterList(lang, filters.excludeCities, "discover.filter.none")}`,
+        "df:excity:edit"
+      ).row();
+    }
+    const hasExcludeCountries = hasFilterList(filters.excludeCountries);
+    kb.text(`${hasExcludeCountries ? on : off} · ${t(lang, "discover.filter.countries.exclude")}`, "df:excountry").row();
+    if (hasExcludeCountries) {
+      kb.text(
+        `${t(lang, "discover.filter.countries.exclude")} · ${formatFilterList(lang, filters.excludeCountries, "discover.filter.none")}`,
+        "df:excountry:edit"
+      ).row();
+    }
+  } else if (screen === "quality") {
+    kb.text(`${filters.verifiedOnly ? on : off} · ${t(lang, "discover.filter.verified")}`, "df:verified")
+      .text(`${filters.photoOnly ? on : off} · ${t(lang, "discover.filter.photos")}`, "df:photos")
+      .row()
+      .text(discoverRecentLabel(lang, filters), "df:recent")
+      .row();
+    const hasKeyword = hasFilterText(filters.keyword);
+    kb.text(`${hasKeyword ? on : off} · ${t(lang, "discover.filter.keyword")}`, "df:keyword").row();
+    if (hasKeyword) {
+      kb.text(
+        `${t(lang, "discover.filter.keyword")} · ${formatFilterValue(lang, filters.keyword, "discover.filter.none")}`,
+        "df:keyword:edit"
+      ).row();
+    }
   }
-  kb.text(`${t(lang, "discover.filter.interests")} · ${formatFilterList(lang, filters.interests, "discover.filter.none")}`, "df:interests")
-    .row()
-    .text(t(lang, "discover.filter.start"), "df:start")
-    .row()
-    .text(t(lang, "discover.filter.reset"), "df:reset")
-    .text(t(lang, "discover.filter.cancel"), "df:cancel");
+  kb.text(t(lang, "discover.filter.back"), "df:screen:main");
   return kb;
 }
 
@@ -1133,7 +1193,15 @@ async function editDiscoverFilterView(ctx: MyContext, lang: Language, filters: D
     });
     return;
   }
-  await ctx.editMessageText(t(lang, "discover.filter.prompt"), {
+  const title =
+    filters.screen === "who"
+      ? t(lang, "discover.filter.section.who")
+      : filters.screen === "where"
+        ? t(lang, "discover.filter.section.where")
+        : filters.screen === "quality"
+          ? t(lang, "discover.filter.section.quality")
+          : t(lang, "discover.filter.prompt");
+  await ctx.editMessageText(title, {
     reply_markup: discoverFilterKeyboard(lang, filters),
   });
 }
@@ -1145,7 +1213,15 @@ async function replyDiscoverFilterView(ctx: MyContext, lang: Language, filters: 
     });
     return;
   }
-  await ctx.reply(t(lang, "discover.filter.prompt"), {
+  const title =
+    filters.screen === "who"
+      ? t(lang, "discover.filter.section.who")
+      : filters.screen === "where"
+        ? t(lang, "discover.filter.section.where")
+        : filters.screen === "quality"
+          ? t(lang, "discover.filter.section.quality")
+          : t(lang, "discover.filter.prompt");
+  await ctx.reply(title, {
     reply_markup: discoverFilterKeyboard(lang, filters),
   });
 }
@@ -2368,6 +2444,18 @@ export async function createBot() {
     if (!u) return;
     const lang = await getLang(ctx);
     const filters = defaultDiscoverFilters();
+    await ctx.answerCallbackQuery();
+    await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+  });
+
+  bot.callbackQuery(/^df:screen:(main|who|where|quality|interests)$/, async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    const lang = await getLang(ctx);
+    if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
+    const screen = ctx.match?.[1] as DiscoverFilterPayload["screen"];
+    const filters: DiscoverFilterPayload = { ...trimFilterUiState(s.payload), screen };
     await ctx.answerCallbackQuery();
     await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
   });
