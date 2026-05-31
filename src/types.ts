@@ -7,6 +7,7 @@ export type SessionState =
   | { state: "idle"; payload?: Record<string, unknown> }
   | { state: "profile_wizard"; payload: ProfileWizardPayload }
   | { state: "discover_filter"; payload: DiscoverFilterPayload }
+  | { state: "discover_filter_input"; payload: DiscoverFilterInputPayload }
   | { state: "discover"; payload: DiscoverPayload }
   | { state: "chat_request"; payload: ChatRequestPayload }
   | { state: "chat"; payload: ChatPayload }
@@ -84,15 +85,39 @@ export type DiscoverAgeFilter = "profile" | "near" | "18_25" | "26_35" | "36_plu
 export type DiscoverGenderFilter = "profile" | "male" | "female" | "other" | "any";
 export type DiscoverLookingForFilter = "compatible" | "friends" | "dating" | "any";
 export type DiscoverRadiusFilter = "profile" | "10" | "25" | "50" | "100" | "any";
+export type DiscoverRecentActivityFilter = "any" | "1" | "7" | "30";
+export type DiscoverFilterInputField =
+  | "country"
+  | "include_cities"
+  | "exclude_countries"
+  | "exclude_cities"
+  | "keyword"
+  | "age_range";
 
 export type DiscoverFilterPayload = {
   sameCity: boolean;
   sameCountry: boolean;
   verifiedOnly: boolean;
+  photoOnly: boolean;
   age: DiscoverAgeFilter;
+  ageMin?: number | null;
+  ageMax?: number | null;
   gender: DiscoverGenderFilter;
   lookingFor: DiscoverLookingForFilter;
   radius: DiscoverRadiusFilter;
+  recentActivity: DiscoverRecentActivityFilter;
+  country?: string | null;
+  includeCities?: string[];
+  excludeCountries?: string[];
+  excludeCities?: string[];
+  keyword?: string;
+  interests?: string[];
+  screen?: "main" | "interests";
+};
+
+export type DiscoverFilterInputPayload = {
+  filters: DiscoverFilterPayload;
+  field: DiscoverFilterInputField;
 };
 
 export type ChatPayload = {

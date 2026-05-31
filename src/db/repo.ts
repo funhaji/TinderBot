@@ -607,10 +607,20 @@ export async function discoveryCandidates(params: {
   radiusMeters: number;
   limit: number;
   ageFilter?: "profile" | "near" | "18_25" | "26_35" | "36_plus" | "any";
+  ageMin?: number | null;
+  ageMax?: number | null;
   genderFilter?: "profile" | "male" | "female" | "other" | "any";
   sameCity?: boolean;
+  country?: string | null;
+  includeCities?: string[];
+  excludeCountries?: string[];
+  excludeCities?: string[];
   sameCountry?: boolean;
   verifiedOnly?: boolean;
+  photoOnly?: boolean;
+  keyword?: string | null;
+  interestKeys?: string[];
+  recentActivityDays?: number | null;
   lookingForFilter?: "compatible" | "friends" | "dating" | "any";
 }): Promise<number[]> {
   const res = await query<{ id: number }>(
@@ -645,13 +655,28 @@ export async function discoveryCandidates(params: {
       AND bl.id IS NULL
       AND h.id IS NULL
       AND (
-        $4::text = 'any'
-        OR ($4::text = 'near' AND ABS(p.age - me.age) <= 5)
-        OR ($4::text = '18_25' AND p.age BETWEEN 18 AND 25)
-        OR ($4::text = '26_35' AND p.age BETWEEN 26 AND 35)
-        OR ($4::text = '36_plus' AND p.age >= 36)
+        (
+          ($4::int IS NOT NULL OR $5::int IS NOT NULL)
+          AND p.age >= COALESCE($4::int, 18)
+          AND p.age <= COALESCE($5::int, 99)
+        )
         OR (
-          $4::text = 'profile'
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = 'any'
+        )
+        OR (
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = 'near' AND ABS(p.age - me.age) <= 5
+        )
+        OR (
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = '18_25' AND p.age BETWEEN 18 AND 25
+        )
+        OR (
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = '26_35' AND p.age BETWEEN 26 AND 35
+        )
+        OR (
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = '36_plus' AND p.age >= 36
+        )
+        OR (
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = 'profile'
           AND p.age >= COALESCE((me.preferences->>'age_min')::int, 15)
           AND p.age <= COALESCE((me.preferences->>'age_max')::int, 99)
         )
@@ -665,10 +690,10 @@ export async function discoveryCandidates(params: {
         p.gender::text
       )
       AND (
-        $5::text = 'any'
-        OR ($5::text = 'male' AND profile_phys_sex(p.gender::text) = 'm')
-        OR ($5::text = 'female' AND profile_phys_sex(p.gender::text) = 'f')
-        OR ($5::text = 'other' AND profile_phys_sex(p.gender::text) IS NULL)
+        $7::text = 'any'
+        OR ($7::text = 'male' AND profile_phys_sex(p.gender::text) = 'm')
+        OR ($7::text = 'female' AND profile_phys_sex(p.gender::text) = 'f')
+        OR ($7::text = 'other' AND profile_phys_sex(p.gender::text) IS NULL)
         OR (
           me.preferences->'seek_genders' IS NULL
           OR jsonb_typeof(me.preferences->'seek_genders') <> 'array'
@@ -693,9 +718,9 @@ export async function discoveryCandidates(params: {
         )
       )
       AND (
-        $8::text = 'any'
+        $15::text = 'any'
         OR (
-          $8::text = 'compatible'
+          $15::text = 'compatible'
           AND (
             COALESCE(me.preferences->>'looking_for', 'both') = 'both'
             OR COALESCE(p.preferences->>'looking_for', 'both') = 'both'
@@ -703,11 +728,11 @@ export async function discoveryCandidates(params: {
           )
         )
         OR (
-          $8::text = 'friends'
+          $15::text = 'friends'
           AND COALESCE(p.preferences->>'looking_for', 'both') IN ('friends', 'both')
         )
         OR (
-          $8::text = 'dating'
+          $15::text = 'dating'
           AND COALESCE(p.preferences->>'looking_for', 'both') IN ('dating', 'both')
         )
       )
@@ -726,18 +751,63 @@ export async function discoveryCandidates(params: {
         ) <= $3::double precision
       )
       AND (
-        $6::boolean = false
+        $8::boolean = false
         OR COALESCE(me.city, '') = ''
         OR LOWER(COALESCE(p.city, '')) = LOWER(COALESCE(me.city, ''))
       )
       AND (
-        $7::boolean = false
+        $9::boolean = false
         OR COALESCE(me.preferences->>'country', '') = ''
         OR LOWER(COALESCE(p.preferences->>'country', '')) = LOWER(COALESCE(me.preferences->>'country', ''))
       )
       AND (
-        $9::boolean = false
+        $10::text IS NULL
+        OR $10::text = ''
+        OR LOWER(COALESCE(p.preferences->>'country', '')) = $10::text
+      )
+      AND (
+        COALESCE(array_length($11::text[], 1), 0) = 0
+        OR LOWER(COALESCE(p.city, '')) = ANY($11::text[])
+      )
+      AND (
+        COALESCE(array_length($12::text[], 1), 0) = 0
+        OR LOWER(COALESCE(p.preferences->>'country', '')) <> ALL($12::text[])
+      )
+      AND (
+        COALESCE(array_length($13::text[], 1), 0) = 0
+        OR LOWER(COALESCE(p.city, '')) <> ALL($13::text[])
+      )
+      AND (
+        $14::boolean = false
         OR u.badge_verified = true
+      )
+      AND (
+        $16::int IS NULL
+        OR u.last_seen_at > now() - make_interval(days => $16::int)
+      )
+      AND (
+        $17::boolean = false
+        OR EXISTS (SELECT 1 FROM photos ph WHERE ph.user_id = u.id)
+      )
+      AND (
+        $18::text IS NULL
+        OR $18::text = ''
+        OR (
+          p.display_name ILIKE '%' || $18::text || '%'
+          OR p.bio ILIKE '%' || $18::text || '%'
+          OR COALESCE(p.preferences->>'personal_traits', '') ILIKE '%' || $18::text || '%'
+          OR COALESCE(p.preferences->>'partner_traits', '') ILIKE '%' || $18::text || '%'
+        )
+      )
+      AND (
+        COALESCE(array_length($19::text[], 1), 0) = 0
+        OR EXISTS (
+          SELECT 1
+          FROM user_interests ui
+          JOIN interests i ON i.id = ui.interest_id
+          WHERE ui.user_id = u.id
+            AND i.key = ANY($19::text[])
+        )
       )
     ORDER BY
       CASE
@@ -768,12 +838,22 @@ export async function discoveryCandidates(params: {
       params.meId,
       params.limit,
       params.radiusMeters,
+      params.ageMin ?? null,
+      params.ageMax ?? null,
       params.ageFilter ?? "profile",
       params.genderFilter ?? "profile",
       params.sameCity === true,
       params.sameCountry === true,
-      params.lookingForFilter ?? "compatible",
+      params.country?.trim().toLowerCase() || null,
+      (params.includeCities ?? []).map((v) => v.trim().toLowerCase()).filter(Boolean),
+      (params.excludeCountries ?? []).map((v) => v.trim().toLowerCase()).filter(Boolean),
+      (params.excludeCities ?? []).map((v) => v.trim().toLowerCase()).filter(Boolean),
       params.verifiedOnly === true,
+      params.lookingForFilter ?? "compatible",
+      params.recentActivityDays ?? null,
+      params.photoOnly === true,
+      params.keyword?.trim() || null,
+      (params.interestKeys ?? []).filter(Boolean),
     ]
   );
   return res.rows.map((r) => r.id);

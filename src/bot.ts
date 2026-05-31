@@ -12,6 +12,7 @@ import { logger } from "./logger.js";
 import { formatProfileBadgesLine, formatProfileBadgesShort } from "./profile/badges.js";
 import { genderLabel, orientationLabel } from "./profile/compat.js";
 import type {
+  DiscoverFilterInputField,
   DiscoverFilterPayload,
   Language,
   LookingFor,
@@ -823,10 +824,21 @@ function defaultDiscoverFilters(): DiscoverFilterPayload {
     sameCity: false,
     sameCountry: false,
     verifiedOnly: false,
+    photoOnly: false,
     age: "profile",
+    ageMin: null,
+    ageMax: null,
     gender: "profile",
     lookingFor: "compatible",
     radius: "profile",
+    recentActivity: "any",
+    country: null,
+    includeCities: [],
+    excludeCountries: [],
+    excludeCities: [],
+    keyword: "",
+    interests: [],
+    screen: "main",
   };
 }
 
@@ -835,10 +847,21 @@ function quickDiscoverFilters(): DiscoverFilterPayload {
     sameCity: false,
     sameCountry: false,
     verifiedOnly: false,
+    photoOnly: false,
     age: "any",
+    ageMin: null,
+    ageMax: null,
     gender: "any",
     lookingFor: "any",
     radius: "any",
+    recentActivity: "any",
+    country: null,
+    includeCities: [],
+    excludeCountries: [],
+    excludeCities: [],
+    keyword: "",
+    interests: [],
+    screen: "main",
   };
 }
 
@@ -863,11 +886,65 @@ function discoverRadiusMeters(
   return config.DISCOVERY_RADIUS_METERS;
 }
 
+function trimFilterUiState(filters: DiscoverFilterPayload): DiscoverFilterPayload {
+  return { ...filters, screen: "main" };
+}
+
+function formatFilterValue(lang: Language, value: string | null | undefined, emptyKey: string): string {
+  return value && value.trim() ? value.trim() : t(lang, emptyKey);
+}
+
+function formatFilterList(lang: Language, values: string[] | undefined, emptyKey: string): string {
+  if (!values || values.length === 0) return t(lang, emptyKey);
+  const preview = values.slice(0, 2).join(", ");
+  return values.length > 2 ? `${preview} +${values.length - 2}` : preview;
+}
+
+function discoverActivityDays(filter: DiscoverFilterPayload["recentActivity"]): number | null {
+  if (filter === "1") return 1;
+  if (filter === "7") return 7;
+  if (filter === "30") return 30;
+  return null;
+}
+
+function discoverFilterPrompt(lang: Language, field: DiscoverFilterInputField): string {
+  if (field === "country") return t(lang, "discover.filter.input.country");
+  if (field === "include_cities") return t(lang, "discover.filter.input.includeCities");
+  if (field === "exclude_countries") return t(lang, "discover.filter.input.excludeCountries");
+  if (field === "exclude_cities") return t(lang, "discover.filter.input.excludeCities");
+  if (field === "keyword") return t(lang, "discover.filter.input.keyword");
+  return t(lang, "discover.filter.input.ageRange");
+}
+
+function parseListInput(text: string): string[] {
+  if (text.trim() === "-") return [];
+  return Array.from(
+    new Set(
+      text
+        .split(/[\n,]+/)
+        .map((v) => v.trim())
+        .filter(Boolean)
+        .slice(0, 10)
+    )
+  );
+}
+
+function parseAgeRangeInput(text: string): { min: number; max: number } | null {
+  const m = text.trim().match(/^(\d{1,2})\s*[- ]\s*(\d{1,2})$/);
+  if (!m) return null;
+  const min = Number(m[1]);
+  const max = Number(m[2]);
+  if (!Number.isInteger(min) || !Number.isInteger(max) || min < 18 || max > 99 || min > max) return null;
+  return { min, max };
+}
+
 function discoverFilterKeyboard(lang: Language, filters: DiscoverFilterPayload) {
   const on = lang === "fa" ? "روشن" : "On";
   const off = lang === "fa" ? "خاموش" : "Off";
   const ageKey =
-    filters.age === "profile"
+    filters.ageMin != null || filters.ageMax != null
+      ? null
+      : filters.age === "profile"
       ? "discover.filter.age.profile"
       : filters.age === "near"
         ? "discover.filter.age.near"
@@ -908,14 +985,32 @@ function discoverFilterKeyboard(lang: Language, filters: DiscoverFilterPayload) 
             : filters.radius === "100"
               ? "discover.filter.radius.100"
               : "discover.filter.radius.any";
+  const recentKey =
+    filters.recentActivity === "1"
+      ? "discover.filter.recent.1"
+      : filters.recentActivity === "7"
+        ? "discover.filter.recent.7"
+        : filters.recentActivity === "30"
+          ? "discover.filter.recent.30"
+          : "discover.filter.recent.any";
   return new InlineKeyboard()
     .text(`${filters.sameCity ? on : off} · ${t(lang, "discover.filter.city")}`, "df:city")
     .row()
     .text(`${filters.sameCountry ? on : off} · ${t(lang, "discover.filter.country")}`, "df:country")
     .row()
-    .text(`${filters.verifiedOnly ? on : off} · ${t(lang, "discover.filter.verified")}`, "df:verified")
+    .text(`${t(lang, "discover.filter.country.pick")} · ${formatFilterValue(lang, filters.country, "discover.filter.none")}`, "df:setcountry")
     .row()
-    .text(t(lang, ageKey), "df:age")
+    .text(`${t(lang, "discover.filter.cities.include")} · ${formatFilterList(lang, filters.includeCities, "discover.filter.none")}`, "df:addcity")
+    .row()
+    .text(`${t(lang, "discover.filter.cities.exclude")} · ${formatFilterList(lang, filters.excludeCities, "discover.filter.none")}`, "df:excity")
+    .row()
+    .text(`${t(lang, "discover.filter.countries.exclude")} · ${formatFilterList(lang, filters.excludeCountries, "discover.filter.none")}`, "df:excountry")
+    .row()
+    .text(`${filters.verifiedOnly ? on : off} · ${t(lang, "discover.filter.verified")}`, "df:verified")
+    .text(`${filters.photoOnly ? on : off} · ${t(lang, "discover.filter.photos")}`, "df:photos")
+    .row()
+    .text(ageKey ? t(lang, ageKey) : tf(lang, "discover.filter.age.custom", { min: filters.ageMin ?? 18, max: filters.ageMax ?? 99 }), "df:age")
+    .text(t(lang, "discover.filter.age.edit"), "df:agecustom")
     .row()
     .text(t(lang, genderKey), "df:gender")
     .row()
@@ -923,10 +1018,57 @@ function discoverFilterKeyboard(lang: Language, filters: DiscoverFilterPayload) 
     .row()
     .text(t(lang, radiusKey), "df:radius")
     .row()
+    .text(t(lang, recentKey), "df:recent")
+    .row()
+    .text(`${t(lang, "discover.filter.keyword")} · ${formatFilterValue(lang, filters.keyword, "discover.filter.none")}`, "df:keyword")
+    .row()
+    .text(`${t(lang, "discover.filter.interests")} · ${formatFilterList(lang, filters.interests, "discover.filter.none")}`, "df:interests")
+    .row()
     .text(t(lang, "discover.filter.start"), "df:start")
     .row()
     .text(t(lang, "discover.filter.reset"), "df:reset")
     .text(t(lang, "discover.filter.cancel"), "df:cancel");
+}
+
+async function discoverInterestKeyboard(lang: Language, selected: string[]) {
+  const interests = await listInterests();
+  const kb = new InlineKeyboard();
+  for (const i of interests) {
+    const label = (selected.includes(i.key) ? "✅ " : "") + (lang === "fa" ? i.fa_label : i.en_label);
+    kb.text(label, `dfi:${i.key}`).row();
+  }
+  kb.text(t(lang, "discover.filter.interests.reset"), "dfi:reset")
+    .text(t(lang, "discover.filter.interests.done"), "dfi:done");
+  return kb;
+}
+
+async function editDiscoverFilterView(ctx: MyContext, lang: Language, filters: DiscoverFilterPayload) {
+  if (filters.screen === "interests") {
+    await ctx.editMessageText(t(lang, "discover.filter.interests.prompt"), {
+      reply_markup: await discoverInterestKeyboard(lang, filters.interests ?? []),
+    });
+    return;
+  }
+  await ctx.editMessageText(t(lang, "discover.filter.prompt"), {
+    reply_markup: discoverFilterKeyboard(lang, filters),
+  });
+}
+
+async function replyDiscoverFilterView(ctx: MyContext, lang: Language, filters: DiscoverFilterPayload) {
+  if (filters.screen === "interests") {
+    await ctx.reply(t(lang, "discover.filter.interests.prompt"), {
+      reply_markup: await discoverInterestKeyboard(lang, filters.interests ?? []),
+    });
+    return;
+  }
+  await ctx.reply(t(lang, "discover.filter.prompt"), {
+    reply_markup: discoverFilterKeyboard(lang, filters),
+  });
+}
+
+async function saveAndEditDiscoverFilters(ctx: MyContext, userId: number, lang: Language, filters: DiscoverFilterPayload) {
+  await setSession(userId, { state: "discover_filter", payload: filters });
+  await editDiscoverFilterView(ctx, lang, filters);
 }
 
 async function launchDiscoverFilters(ctx: MyContext, userId: number) {
@@ -947,11 +1089,21 @@ async function discoverCore(ctx: MyContext, userId: number, filters: DiscoverFil
     lon: p.location_lon,
     radiusMeters: radius,
     limit: config.DISCOVERY_BATCH_SIZE,
+    ageMin: filters.ageMin ?? null,
+    ageMax: filters.ageMax ?? null,
     ageFilter: filters.age,
     genderFilter: filters.gender,
     sameCity: filters.sameCity,
+    country: filters.country ?? null,
+    includeCities: filters.includeCities ?? [],
+    excludeCountries: filters.excludeCountries ?? [],
+    excludeCities: filters.excludeCities ?? [],
     sameCountry: filters.sameCountry,
     verifiedOnly: filters.verifiedOnly,
+    photoOnly: filters.photoOnly,
+    keyword: filters.keyword?.trim() || null,
+    interestKeys: filters.interests ?? [],
+    recentActivityDays: discoverActivityDays(filters.recentActivity),
     lookingForFilter: filters.lookingFor,
   });
   if (candidates.length === 0) {
@@ -1527,9 +1679,14 @@ export async function createBot() {
     if (s.state === "discover_filter") {
       if (!ctx.message.text?.startsWith("/")) {
         const dfLang = await getLang(ctx);
-        await ctx.reply(t(dfLang, "discover.filter.prompt"), {
-          reply_markup: discoverFilterKeyboard(dfLang, s.payload),
-        });
+        await replyDiscoverFilterView(ctx, dfLang, s.payload);
+      }
+      return next();
+    }
+    if (s.state === "discover_filter_input") {
+      if (!ctx.message.text?.startsWith("/")) {
+        const dfLang = await getLang(ctx);
+        await ctx.reply(discoverFilterPrompt(dfLang, s.payload.field));
       }
       return next();
     }
@@ -1966,9 +2123,16 @@ export async function createBot() {
       await ctx.reply(t(lang, "chat.requestDeclined"), { reply_markup: buildCodeHomeReplyKeyboard(lang) });
       return;
     }
-    if (s.state === "discover_filter") {
-      await resetSession(u.id);
-      await sendMainMenuReply(ctx);
+    if (s.state === "discover_filter" || s.state === "discover_filter_input") {
+      if (s.state === "discover_filter_input") {
+        const filters = trimFilterUiState(s.payload.filters);
+        await setSession(u.id, { state: "discover_filter", payload: filters });
+        await replyDiscoverFilterView(ctx, lang, filters);
+      } else {
+        await resetSession(u.id);
+        await sendMainMenuReply(ctx);
+      }
+      return;
     }
   });
 
@@ -2107,12 +2271,9 @@ export async function createBot() {
     const s = await getSession(u.id);
     const lang = await getLang(ctx);
     if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
-    const filters = { ...s.payload, sameCity: !s.payload.sameCity };
-    await setSession(u.id, { state: "discover_filter", payload: filters });
+    const filters = { ...trimFilterUiState(s.payload), sameCity: !s.payload.sameCity };
     await ctx.answerCallbackQuery();
-    await ctx.editMessageText(t(lang, "discover.filter.prompt"), {
-      reply_markup: discoverFilterKeyboard(lang, filters),
-    });
+    await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
   });
 
   bot.callbackQuery("dfm:quick", async (ctx) => {
@@ -2128,11 +2289,8 @@ export async function createBot() {
     if (!u) return;
     const lang = await getLang(ctx);
     const filters = defaultDiscoverFilters();
-    await setSession(u.id, { state: "discover_filter", payload: filters });
     await ctx.answerCallbackQuery();
-    await ctx.editMessageText(t(lang, "discover.filter.prompt"), {
-      reply_markup: discoverFilterKeyboard(lang, filters),
-    });
+    await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
   });
 
   bot.callbackQuery("df:country", async (ctx) => {
@@ -2141,12 +2299,9 @@ export async function createBot() {
     const s = await getSession(u.id);
     const lang = await getLang(ctx);
     if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
-    const filters = { ...s.payload, sameCountry: !s.payload.sameCountry };
-    await setSession(u.id, { state: "discover_filter", payload: filters });
+    const filters = { ...trimFilterUiState(s.payload), sameCountry: !s.payload.sameCountry };
     await ctx.answerCallbackQuery();
-    await ctx.editMessageText(t(lang, "discover.filter.prompt"), {
-      reply_markup: discoverFilterKeyboard(lang, filters),
-    });
+    await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
   });
 
   bot.callbackQuery("df:verified", async (ctx) => {
@@ -2155,12 +2310,76 @@ export async function createBot() {
     const s = await getSession(u.id);
     const lang = await getLang(ctx);
     if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
-    const filters = { ...s.payload, verifiedOnly: !s.payload.verifiedOnly };
-    await setSession(u.id, { state: "discover_filter", payload: filters });
+    const filters = { ...trimFilterUiState(s.payload), verifiedOnly: !s.payload.verifiedOnly };
     await ctx.answerCallbackQuery();
-    await ctx.editMessageText(t(lang, "discover.filter.prompt"), {
-      reply_markup: discoverFilterKeyboard(lang, filters),
+    await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+  });
+
+  bot.callbackQuery("df:photos", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    const lang = await getLang(ctx);
+    if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
+    const filters = { ...trimFilterUiState(s.payload), photoOnly: !s.payload.photoOnly };
+    await ctx.answerCallbackQuery();
+    await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+  });
+
+  bot.callbackQuery("df:setcountry", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    const lang = await getLang(ctx);
+    if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
+    await setSession(u.id, {
+      state: "discover_filter_input",
+      payload: { filters: trimFilterUiState(s.payload), field: "country" },
     });
+    await ctx.answerCallbackQuery();
+    await ctx.reply(discoverFilterPrompt(lang, "country"));
+  });
+
+  bot.callbackQuery("df:addcity", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    const lang = await getLang(ctx);
+    if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
+    await setSession(u.id, {
+      state: "discover_filter_input",
+      payload: { filters: trimFilterUiState(s.payload), field: "include_cities" },
+    });
+    await ctx.answerCallbackQuery();
+    await ctx.reply(discoverFilterPrompt(lang, "include_cities"));
+  });
+
+  bot.callbackQuery("df:excountry", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    const lang = await getLang(ctx);
+    if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
+    await setSession(u.id, {
+      state: "discover_filter_input",
+      payload: { filters: trimFilterUiState(s.payload), field: "exclude_countries" },
+    });
+    await ctx.answerCallbackQuery();
+    await ctx.reply(discoverFilterPrompt(lang, "exclude_countries"));
+  });
+
+  bot.callbackQuery("df:excity", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    const lang = await getLang(ctx);
+    if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
+    await setSession(u.id, {
+      state: "discover_filter_input",
+      payload: { filters: trimFilterUiState(s.payload), field: "exclude_cities" },
+    });
+    await ctx.answerCallbackQuery();
+    await ctx.reply(discoverFilterPrompt(lang, "exclude_cities"));
   });
 
   bot.callbackQuery("df:age", async (ctx) => {
@@ -2171,12 +2390,23 @@ export async function createBot() {
     if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
     const ageOrder: DiscoverFilterPayload["age"][] = ["profile", "near", "18_25", "26_35", "36_plus", "any"];
     const age = ageOrder[(ageOrder.indexOf(s.payload.age) + 1) % ageOrder.length]!;
-    const filters: DiscoverFilterPayload = { ...s.payload, age };
-    await setSession(u.id, { state: "discover_filter", payload: filters });
+    const filters: DiscoverFilterPayload = { ...trimFilterUiState(s.payload), age, ageMin: null, ageMax: null };
     await ctx.answerCallbackQuery();
-    await ctx.editMessageText(t(lang, "discover.filter.prompt"), {
-      reply_markup: discoverFilterKeyboard(lang, filters),
+    await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+  });
+
+  bot.callbackQuery("df:agecustom", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    const lang = await getLang(ctx);
+    if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
+    await setSession(u.id, {
+      state: "discover_filter_input",
+      payload: { filters: trimFilterUiState(s.payload), field: "age_range" },
     });
+    await ctx.answerCallbackQuery();
+    await ctx.reply(discoverFilterPrompt(lang, "age_range"));
   });
 
   bot.callbackQuery("df:gender", async (ctx) => {
@@ -2187,12 +2417,9 @@ export async function createBot() {
     if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
     const genderOrder: DiscoverFilterPayload["gender"][] = ["profile", "male", "female", "other", "any"];
     const gender = genderOrder[(genderOrder.indexOf(s.payload.gender) + 1) % genderOrder.length]!;
-    const filters: DiscoverFilterPayload = { ...s.payload, gender };
-    await setSession(u.id, { state: "discover_filter", payload: filters });
+    const filters: DiscoverFilterPayload = { ...trimFilterUiState(s.payload), gender };
     await ctx.answerCallbackQuery();
-    await ctx.editMessageText(t(lang, "discover.filter.prompt"), {
-      reply_markup: discoverFilterKeyboard(lang, filters),
-    });
+    await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
   });
 
   bot.callbackQuery("df:looking", async (ctx) => {
@@ -2203,12 +2430,9 @@ export async function createBot() {
     if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
     const lookingOrder: DiscoverFilterPayload["lookingFor"][] = ["compatible", "friends", "dating", "any"];
     const lookingFor = lookingOrder[(lookingOrder.indexOf(s.payload.lookingFor) + 1) % lookingOrder.length]!;
-    const filters: DiscoverFilterPayload = { ...s.payload, lookingFor };
-    await setSession(u.id, { state: "discover_filter", payload: filters });
+    const filters: DiscoverFilterPayload = { ...trimFilterUiState(s.payload), lookingFor };
     await ctx.answerCallbackQuery();
-    await ctx.editMessageText(t(lang, "discover.filter.prompt"), {
-      reply_markup: discoverFilterKeyboard(lang, filters),
-    });
+    await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
   });
 
   bot.callbackQuery("df:radius", async (ctx) => {
@@ -2219,12 +2443,88 @@ export async function createBot() {
     if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
     const radiusOrder: DiscoverFilterPayload["radius"][] = ["profile", "10", "25", "50", "100", "any"];
     const radius = radiusOrder[(radiusOrder.indexOf(s.payload.radius) + 1) % radiusOrder.length]!;
-    const filters: DiscoverFilterPayload = { ...s.payload, radius };
-    await setSession(u.id, { state: "discover_filter", payload: filters });
+    const filters: DiscoverFilterPayload = { ...trimFilterUiState(s.payload), radius };
     await ctx.answerCallbackQuery();
-    await ctx.editMessageText(t(lang, "discover.filter.prompt"), {
-      reply_markup: discoverFilterKeyboard(lang, filters),
+    await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+  });
+
+  bot.callbackQuery("df:recent", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    const lang = await getLang(ctx);
+    if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
+    const order: DiscoverFilterPayload["recentActivity"][] = ["any", "1", "7", "30"];
+    const recentActivity = order[(order.indexOf(s.payload.recentActivity) + 1) % order.length]!;
+    const filters: DiscoverFilterPayload = { ...trimFilterUiState(s.payload), recentActivity };
+    await ctx.answerCallbackQuery();
+    await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+  });
+
+  bot.callbackQuery("df:keyword", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    const lang = await getLang(ctx);
+    if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
+    await setSession(u.id, {
+      state: "discover_filter_input",
+      payload: { filters: trimFilterUiState(s.payload), field: "keyword" },
     });
+    await ctx.answerCallbackQuery();
+    await ctx.reply(discoverFilterPrompt(lang, "keyword"));
+  });
+
+  bot.callbackQuery("df:interests", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    const lang = await getLang(ctx);
+    if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
+    const filters: DiscoverFilterPayload = { ...trimFilterUiState(s.payload), screen: "interests" };
+    await ctx.answerCallbackQuery();
+    await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+  });
+
+  bot.callbackQuery(/^dfi:(?!done$|reset$)(.+)$/, async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    const lang = await getLang(ctx);
+    if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
+    const key = String(ctx.match?.[1]);
+    const current = new Set(s.payload.interests ?? []);
+    if (current.has(key)) current.delete(key);
+    else if (current.size < 6) current.add(key);
+    const filters: DiscoverFilterPayload = {
+      ...trimFilterUiState(s.payload),
+      screen: "interests",
+      interests: Array.from(current),
+    };
+    await ctx.answerCallbackQuery();
+    await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+  });
+
+  bot.callbackQuery("dfi:reset", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    const lang = await getLang(ctx);
+    if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
+    const filters: DiscoverFilterPayload = { ...trimFilterUiState(s.payload), screen: "interests", interests: [] };
+    await ctx.answerCallbackQuery();
+    await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+  });
+
+  bot.callbackQuery("dfi:done", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    const lang = await getLang(ctx);
+    if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
+    const filters: DiscoverFilterPayload = { ...trimFilterUiState(s.payload), screen: "main" };
+    await ctx.answerCallbackQuery();
+    await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
   });
 
   bot.callbackQuery("df:reset", async (ctx) => {
@@ -2232,11 +2532,8 @@ export async function createBot() {
     if (!u) return;
     const lang = await getLang(ctx);
     const filters = defaultDiscoverFilters();
-    await setSession(u.id, { state: "discover_filter", payload: filters });
     await ctx.answerCallbackQuery();
-    await ctx.editMessageText(t(lang, "discover.filter.prompt"), {
-      reply_markup: discoverFilterKeyboard(lang, filters),
-    });
+    await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
   });
 
   bot.callbackQuery("df:cancel", async (ctx) => {
@@ -2255,7 +2552,7 @@ export async function createBot() {
     if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
     await ctx.answerCallbackQuery();
     await clearPressedInlineKeyboard(ctx);
-    await discoverCore(ctx, u.id, s.payload);
+    await discoverCore(ctx, u.id, trimFilterUiState(s.payload));
   });
 
   bot.callbackQuery(cb.discover, async (ctx) => {
@@ -2895,8 +3192,40 @@ export async function createBot() {
       return;
     }
 
-    if (s.state !== "profile_wizard") return;
     const text = ctx.msg.text.trim();
+    if (s.state === "discover_filter_input") {
+      const nextFilters = { ...s.payload.filters, screen: "main" as const };
+      if (text === "/cancel") {
+        await setSession(u.id, { state: "discover_filter", payload: nextFilters });
+        await replyDiscoverFilterView(ctx, lang, nextFilters);
+        return;
+      }
+      if (s.payload.field === "country") {
+        nextFilters.country = text === "-" ? null : text.slice(0, 64);
+      } else if (s.payload.field === "include_cities") {
+        nextFilters.includeCities = parseListInput(text);
+      } else if (s.payload.field === "exclude_countries") {
+        nextFilters.excludeCountries = parseListInput(text);
+      } else if (s.payload.field === "exclude_cities") {
+        nextFilters.excludeCities = parseListInput(text);
+      } else if (s.payload.field === "keyword") {
+        nextFilters.keyword = text === "-" ? "" : text.slice(0, 80);
+      } else {
+        const range = parseAgeRangeInput(text);
+        if (!range) {
+          await ctx.reply(t(lang, "discover.filter.input.ageRangeInvalid"));
+          await ctx.reply(discoverFilterPrompt(lang, s.payload.field));
+          return;
+        }
+        nextFilters.ageMin = range.min;
+        nextFilters.ageMax = range.max;
+      }
+      await setSession(u.id, { state: "discover_filter", payload: nextFilters });
+      await replyDiscoverFilterView(ctx, lang, nextFilters);
+      return;
+    }
+
+    if (s.state !== "profile_wizard") return;
     const payload = s.payload;
 
     if (payload.step === "name") {
