@@ -55,6 +55,10 @@ const fa: Dict = {
   "likers.title": "کسانی که شما را لایک کرده‌اند",
   "likers.none": "فعلاً کسی نیست که تو را لایک کرده باشد و هنوز مچ نشده.",
   "likers.likeBack": "لایک متقابل ❤️",
+  "likers.pageInfo": "صفحه {page} از {total} · {count} نفر",
+  "likers.prev": "‹ قبلی",
+  "likers.next": "بعدی ›",
+  "likers.truncated": "نمایش {shown} نفر اخیر (لیست کامل‌تر در نسخه‌های بعد).",
 
   "delete.confirm": "حساب پاک شود؟ این کار برگشت‌ناپذیر است.",
   "delete.yes": "بله، پاک کن",
@@ -252,7 +256,11 @@ const fa: Dict = {
   "mystery.expiredNoMatch": "❌ کسی در صف پیدا نشد. دوباره تلاش کن.",
 
   "chat.exit": "از چت خارج شدی.",
-  "chat.endButton": "پایان گفتگو",
+  "chat.endButton": "پایان چت",
+  "chat.sendId": "ارسال آیدی",
+  "chat.viewPartnerProfile": "مشاهده پروفایل مخاطب",
+  "chat.idSent": "آیدی تو برای طرف مقابل فرستاده شد:\n#ID:{id}",
+  "chat.idReceived": "طرف مقابل آیدی خودش را فرستاد:\n#ID:{id}",
   "chat.blocked": "کاربر مسدود شد.",
   "chat.unsupported": "این نوع پیام پشتیبانی نمی‌شود.",
 
@@ -484,6 +492,10 @@ const en: Dict = {
   "likers.title": "People who liked you",
   "likers.none": "No pending likers right now.",
   "likers.likeBack": "Like back ❤️",
+  "likers.pageInfo": "Page {page} of {total} · {count} total",
+  "likers.prev": "‹ Prev",
+  "likers.next": "Next ›",
+  "likers.truncated": "Showing your {shown} most recent likers.",
 
   "delete.confirm": "Delete your account? This cannot be undone.",
   "delete.yes": "Yes, delete",
@@ -681,7 +693,11 @@ const en: Dict = {
   "mystery.expiredNoMatch": "❌ No one found in the queue. Try again.",
 
   "chat.exit": "You left the chat.",
-  "chat.endButton": "End conversation",
+  "chat.endButton": "End chat",
+  "chat.sendId": "Send ID",
+  "chat.viewPartnerProfile": "View partner profile",
+  "chat.idSent": "Your ID was sent to your chat partner:\n#ID:{id}",
+  "chat.idReceived": "Your chat partner sent their ID:\n#ID:{id}",
   "chat.blocked": "User blocked.",
   "chat.unsupported": "This message type is not supported.",
 

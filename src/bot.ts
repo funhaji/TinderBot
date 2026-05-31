@@ -122,14 +122,28 @@ function mr(lang: Language, key: string): string {
 }
 // ────────────────────────────────────────────────────────────────────────────
 
+function chatKeyboard(lang: Language, isMystery = false) {
+  const kb = new Keyboard();
+  if (isMystery) {
+    kb.text(t(lang, "chat.sendId"))
+      .text(t(lang, "chat.viewPartnerProfile"))
+      .row();
+  }
+  return kb.text(t(lang, "chat.endButton")).resized();
+}
+
 function chatEndKeyboard(lang: Language) {
-  return new Keyboard().text(t(lang, "chat.endButton")).resized();
+  return chatKeyboard(lang, false);
+}
+
+function matchesChatButton(text: string | undefined, key: string): boolean {
+  if (!text) return false;
+  const trimmed = text.trim();
+  return trimmed === t("en", key) || trimmed === t("fa", key);
 }
 
 function isEndConversationText(text: string | undefined): boolean {
-  if (!text) return false;
-  const trimmed = text.trim();
-  return trimmed === t("en", "chat.endButton") || trimmed === t("fa", "chat.endButton");
+  return matchesChatButton(text, "chat.endButton");
 }
 
 function isChatBusyState(state: SessionState["state"]): boolean {
@@ -148,7 +162,7 @@ async function notifyUserById(
   api: Bot<MyContext>["api"],
   userId: number,
   message: string,
-  reply_markup?: ReturnType<typeof buildCodeHomeReplyKeyboard> | ReturnType<typeof chatEndKeyboard>
+  reply_markup?: ReturnType<typeof buildCodeHomeReplyKeyboard> | ReturnType<typeof chatKeyboard>
 ) {
   const tgId = await getTelegramIdByUserId(userId);
   if (!tgId) return;
@@ -167,7 +181,7 @@ async function notifyUserByKey(
     replyMarkup === "home"
       ? buildCodeHomeReplyKeyboard(lang)
       : replyMarkup === "chatEnd"
-        ? chatEndKeyboard(lang)
+        ? chatKeyboard(lang, false)
         : undefined;
   await notifyUserById(api, userId, t(lang, key), markup);
 }
@@ -234,7 +248,7 @@ async function cancelLinkedChatRequest(api: Bot<MyContext>["api"], userId: numbe
 async function startAcceptedChat(ctx: MyContext, userId: number, otherId: number, lang: Language) {
   await setSession(userId, { state: "chat", payload: { withUserId: otherId } });
   await setSession(otherId, { state: "chat", payload: { withUserId: userId } });
-  await ctx.reply(t(lang, "chat.start"), { reply_markup: chatEndKeyboard(lang) });
+  await ctx.reply(t(lang, "chat.start"), { reply_markup: chatKeyboard(lang, false) });
   await notifyUserByKey(ctx.api, otherId, "chat.start", "chatEnd");
 }
 
@@ -251,10 +265,10 @@ async function startMysteryChatPair(ctx: MyContext, userId: number, partnerId: n
     state: "chat",
     payload: { withUserId: userId, isMystery: true, startedAt: now, lastActivityAt: now },
   });
-  await ctx.reply(t(lang, "mystery.matched"), { reply_markup: chatEndKeyboard(lang) });
+  await ctx.reply(t(lang, "mystery.matched"), { reply_markup: chatKeyboard(lang, true) });
   if (partnerTgId) {
     await ctx.api
-      .sendMessage(partnerTgId, t(partnerLang, "mystery.matched"), { reply_markup: chatEndKeyboard(partnerLang) })
+      .sendMessage(partnerTgId, t(partnerLang, "mystery.matched"), { reply_markup: chatKeyboard(partnerLang, true) })
       .catch(() => {});
   }
 }
@@ -680,7 +694,7 @@ function lookingForLabel(lang: Language, lf: string | undefined): string {
   return "—";
 }
 
-function formatMatchProfileCaption(lang: Language, p: ProfileRow): string {
+function formatMatchProfileCaption(lang: Language, p: ProfileRow, telegramId?: number | null): string {
   const prfs = p.preferences ?? {};
   const country = prfs.country || "";
   const lines: string[] = [];
@@ -701,7 +715,34 @@ function formatMatchProfileCaption(lang: Language, p: ProfileRow): string {
     lines.push(`\u2022 Gender: ${genderLabel(lang, p.gender)}`);
     if (prfs.personal_traits) lines.push(`\u2022 About: ${prfs.personal_traits}`);
   }
+  if (telegramId) lines.push(`#ID:${telegramId}`);
   return lines.join("\n");
+}
+
+async function renderPartnerProfile(ctx: MyContext, viewerId: number, partnerId: number, lang: Language) {
+  const p = await getProfile(partnerId);
+  if (!p) {
+    await ctx.reply(t(lang, "errors.generic"));
+    return;
+  }
+  const viewer = await getProfile(viewerId);
+  const partnerUser = await getUserById(partnerId);
+  const partnerTgId = await getTelegramIdByUserId(partnerId);
+  const badgePrefix = formatProfileBadgesShort(lang, {
+    isOwner: partnerTgId === (config.ownerTelegramId || 7368901661),
+    isAdmin: partnerTgId != null && config.adminTelegramIdSet.has(partnerTgId),
+    verified: !!partnerUser?.badge_verified,
+    vip: !!partnerUser?.badge_vip,
+  });
+  const caption =
+    formatDiscoverCaption({
+      lang,
+      target: p,
+      viewer: viewer ?? p,
+      badgePrefix: badgePrefix.trim() ? `${badgePrefix.trim()}\n` : undefined,
+    }) + (partnerTgId ? `\n#ID:${partnerTgId}` : "");
+  const photoId = await getPrimaryPhoto(partnerId);
+  await replyWithProfilePhoto(ctx, photoId, caption);
 }
 
 async function renderMyProfile(ctx: MyContext, userId: number) {
@@ -927,7 +968,10 @@ function discoverRadiusMeters(
 }
 
 function trimFilterUiState(filters: DiscoverFilterPayload): DiscoverFilterPayload {
-  return { ...filters, screen: filters.screen ?? "main" };
+  const raw = filters.screen as string | undefined;
+  const screen: DiscoverFilterPayload["screen"] =
+    raw === "who" || raw === "where" || raw === "interests" ? raw : "main";
+  return { ...filters, screen };
 }
 
 function formatFilterValue(lang: Language, value: string | null | undefined, emptyKey: string): string {
@@ -1060,11 +1104,18 @@ function discoverRecentLabel(lang: Language, filters: DiscoverFilterPayload): st
   return t(lang, key);
 }
 
-function discoverSectionSummary(lang: Language, filters: DiscoverFilterPayload, screen: "who" | "where" | "quality" | "interests"): string {
+function discoverSectionSummary(lang: Language, filters: DiscoverFilterPayload, screen: "who" | "where" | "interests"): string {
   if (screen === "who") {
-    return [discoverAgeLabel(lang, filters), discoverGenderLabel(lang, filters), discoverLookingForLabel(lang, filters)]
-      .map((s) => s.replace(/^.*?:\s*/, ""))
-      .join(" • ");
+    const parts = [
+      discoverAgeLabel(lang, filters),
+      discoverGenderLabel(lang, filters),
+      discoverLookingForLabel(lang, filters),
+    ]
+      .map((s) => s.replace(/^.*?:\s*/, ""));
+    if (filters.verifiedOnly) parts.push(t(lang, "discover.filter.verified").replace(/^.*?:\s*/, ""));
+    if (filters.photoOnly) parts.push(t(lang, "discover.filter.photos").replace(/^.*?:\s*/, ""));
+    if (hasFilterText(filters.keyword)) parts.push(t(lang, "discover.filter.keyword"));
+    return parts.join(" • ");
   }
   if (screen === "where") {
     const parts: string[] = [];
@@ -1075,14 +1126,6 @@ function discoverSectionSummary(lang: Language, filters: DiscoverFilterPayload, 
     if (hasFilterList(filters.excludeCities)) parts.push(`${t(lang, "discover.filter.cities.exclude")}: ${filters.excludeCities!.length}`);
     if (hasFilterList(filters.excludeCountries)) parts.push(`${t(lang, "discover.filter.countries.exclude")}: ${filters.excludeCountries!.length}`);
     parts.push(discoverRadiusLabel(lang, filters).replace(/^.*?:\s*/, ""));
-    return parts.join(" • ");
-  }
-  if (screen === "quality") {
-    const parts: string[] = [];
-    if (filters.verifiedOnly) parts.push(t(lang, "discover.filter.verified"));
-    if (filters.photoOnly) parts.push(t(lang, "discover.filter.photos"));
-    if (hasFilterText(filters.keyword)) parts.push(t(lang, "discover.filter.keyword"));
-    parts.push(discoverRecentLabel(lang, filters).replace(/^.*?:\s*/, ""));
     return parts.join(" • ");
   }
   if (filters.interests?.length) return tf(lang, "discover.filter.summary.selected", { n: filters.interests.length });
@@ -1099,8 +1142,6 @@ function discoverFilterKeyboard(lang: Language, filters: DiscoverFilterPayload) 
       .row()
       .text(`${t(lang, "discover.filter.section.where")} · ${discoverSectionSummary(lang, filters, "where")}`, "df:screen:where")
       .row()
-      .text(`${t(lang, "discover.filter.section.quality")} · ${discoverSectionSummary(lang, filters, "quality")}`, "df:screen:quality")
-      .row()
       .text(`${t(lang, "discover.filter.interests")} · ${discoverSectionSummary(lang, filters, "interests")}`, "df:screen:interests")
       .row()
       .text(t(lang, "discover.filter.start"), "df:start")
@@ -1112,10 +1153,30 @@ function discoverFilterKeyboard(lang: Language, filters: DiscoverFilterPayload) 
   if (screen === "who") {
     kb.text(discoverAgeLabel(lang, filters), "df:age")
       .text(t(lang, "discover.filter.age.edit"), "df:agecustom")
+      .row();
+    const genderOptions: DiscoverFilterPayload["gender"][] = ["profile", "male", "female", "other", "any"];
+    for (let i = 0; i < genderOptions.length; i++) {
+      const g = genderOptions[i]!;
+      const selected = filters.gender === g;
+      const label =
+        (selected ? "✓ " : "") +
+        discoverGenderLabel(lang, { ...filters, gender: g }).replace(/^.*?:\s*/, "");
+      kb.text(label, `df:gender:${g}`);
+      if (i % 2 === 1 || i === genderOptions.length - 1) kb.row();
+    }
+    kb.text(discoverLookingForLabel(lang, filters), "df:looking")
       .row()
-      .text(discoverGenderLabel(lang, filters), "df:gender")
-      .row()
-      .text(discoverLookingForLabel(lang, filters), "df:looking");
+      .text(`${filters.verifiedOnly ? on : off} · ${t(lang, "discover.filter.verified")}`, "df:verified")
+      .text(`${filters.photoOnly ? on : off} · ${t(lang, "discover.filter.photos")}`, "df:photos")
+      .row();
+    const hasKeyword = hasFilterText(filters.keyword);
+    kb.text(`${hasKeyword ? on : off} · ${t(lang, "discover.filter.keyword")}`, "df:keyword").row();
+    if (hasKeyword) {
+      kb.text(
+        `${t(lang, "discover.filter.keyword")} · ${formatFilterValue(lang, filters.keyword, "discover.filter.none")}`,
+        "df:keyword:edit"
+      ).row();
+    }
   } else if (screen === "where") {
     kb.text(`${filters.sameCity ? on : off} · ${t(lang, "discover.filter.city")}`, "df:city")
       .row()
@@ -1155,20 +1216,6 @@ function discoverFilterKeyboard(lang: Language, filters: DiscoverFilterPayload) 
         "df:excountry:edit"
       ).row();
     }
-  } else if (screen === "quality") {
-    kb.text(`${filters.verifiedOnly ? on : off} · ${t(lang, "discover.filter.verified")}`, "df:verified")
-      .text(`${filters.photoOnly ? on : off} · ${t(lang, "discover.filter.photos")}`, "df:photos")
-      .row()
-      .text(discoverRecentLabel(lang, filters), "df:recent")
-      .row();
-    const hasKeyword = hasFilterText(filters.keyword);
-    kb.text(`${hasKeyword ? on : off} · ${t(lang, "discover.filter.keyword")}`, "df:keyword").row();
-    if (hasKeyword) {
-      kb.text(
-        `${t(lang, "discover.filter.keyword")} · ${formatFilterValue(lang, filters.keyword, "discover.filter.none")}`,
-        "df:keyword:edit"
-      ).row();
-    }
   }
   kb.text(t(lang, "discover.filter.back"), "df:screen:main");
   return kb;
@@ -1198,9 +1245,7 @@ async function editDiscoverFilterView(ctx: MyContext, lang: Language, filters: D
       ? t(lang, "discover.filter.section.who")
       : filters.screen === "where"
         ? t(lang, "discover.filter.section.where")
-        : filters.screen === "quality"
-          ? t(lang, "discover.filter.section.quality")
-          : t(lang, "discover.filter.prompt");
+        : t(lang, "discover.filter.prompt");
   await ctx.editMessageText(title, {
     reply_markup: discoverFilterKeyboard(lang, filters),
   });
@@ -1218,9 +1263,7 @@ async function replyDiscoverFilterView(ctx: MyContext, lang: Language, filters: 
       ? t(lang, "discover.filter.section.who")
       : filters.screen === "where"
         ? t(lang, "discover.filter.section.where")
-        : filters.screen === "quality"
-          ? t(lang, "discover.filter.section.quality")
-          : t(lang, "discover.filter.prompt");
+        : t(lang, "discover.filter.prompt");
   await ctx.reply(title, {
     reply_markup: discoverFilterKeyboard(lang, filters),
   });
@@ -1420,6 +1463,27 @@ async function renderDiscoverCard(ctx: MyContext, userId: number) {
   }
 }
 
+async function sendMatchNotifyMessage(
+  api: Bot<MyContext>["api"],
+  chatId: number,
+  lang: Language,
+  partnerId: number,
+  header: string
+) {
+  const p = await getProfile(partnerId);
+  const partnerTg = await getTelegramIdByUserId(partnerId);
+  const kb = new InlineKeyboard().text(t(lang, "match.chatNow"), cb.matchChat(partnerId));
+  if (!p) {
+    await api.sendMessage(chatId, header, { reply_markup: kb }).catch(() => {});
+    return;
+  }
+  const body = formatMatchProfileCaption(lang, p, partnerTg);
+  const text = `${header}\n\n${body}`;
+  const photo = await getPrimaryPhoto(partnerId);
+  if (photo) await api.sendPhoto(chatId, photo, { caption: text, reply_markup: kb }).catch(() => {});
+  else await api.sendMessage(chatId, text, { reply_markup: kb }).catch(() => {});
+}
+
 async function notifyMatch(ctx: MyContext, swiperId: number, targetId: number) {
   const cfg = await getBotConfig();
   const targetP = await getProfile(targetId);
@@ -1431,13 +1495,23 @@ async function notifyMatch(ctx: MyContext, swiperId: number, targetId: number) {
   if (targetP?.preferences.notify_match !== false) {
     const otherTg = await getTelegramIdByUserId(targetId);
     if (otherTg) {
-      const kb = new InlineKeyboard().text(t(targetLang, "match.chatNow"), cb.matchChat(swiperId));
-      await ctx.api.sendMessage(otherTg, getBotMsg(cfg, "match_notify", targetLang), { reply_markup: kb }).catch(() => {});
+      await sendMatchNotifyMessage(
+        ctx.api,
+        otherTg,
+        targetLang,
+        swiperId,
+        getBotMsg(cfg, "match_notify", targetLang)
+      );
     }
   }
   if (swiperP?.preferences.notify_match !== false) {
-    const kb = new InlineKeyboard().text(t(swiperLang, "match.chatNow"), cb.matchChat(targetId));
-    await ctx.reply(getBotMsg(cfg, "match_notify", swiperLang), { reply_markup: kb });
+    await sendMatchNotifyMessage(
+      ctx.api,
+      ctx.chat!.id,
+      swiperLang,
+      targetId,
+      getBotMsg(cfg, "match_notify", swiperLang)
+    );
   }
 }
 
@@ -1533,21 +1607,69 @@ async function showStats(ctx: MyContext, userId: number) {
   await ctx.reply(lines.join("\n"), { reply_markup: kb });
 }
 
-async function showLikers(ctx: MyContext, userId: number) {
+const LIKERS_PER_PAGE = 10;
+const LIKERS_MAX_LIST = 100;
+
+function likersPageBounds(idsLength: number, page: number) {
+  const totalPages = Math.max(1, Math.ceil(idsLength / LIKERS_PER_PAGE));
+  const safePage = Math.max(0, Math.min(page, totalPages - 1));
+  const start = safePage * LIKERS_PER_PAGE;
+  return { totalPages, safePage, start, end: start + LIKERS_PER_PAGE };
+}
+
+function likersListText(lang: Language, ids: number[], page: number, truncated: boolean) {
+  const { totalPages, safePage } = likersPageBounds(ids.length, page);
+  const lines = [t(lang, "likers.title")];
+  if (totalPages > 1) {
+    lines.push(tf(lang, "likers.pageInfo", { page: safePage + 1, total: totalPages, count: ids.length }));
+  }
+  if (truncated) lines.push(tf(lang, "likers.truncated", { shown: LIKERS_MAX_LIST }));
+  return lines.join("\n");
+}
+
+async function buildLikersKeyboard(lang: Language, ids: number[], page: number) {
+  const { totalPages, safePage, start, end } = likersPageBounds(ids.length, page);
+  const kb = new InlineKeyboard();
+  for (const id of ids.slice(start, end)) {
+    const p = await getProfile(id);
+    const tgId = await getTelegramIdByUserId(id);
+    const idSuffix = tgId ? ` · #${tgId}` : "";
+    const label = p ? `${p.display_name} (${p.age})${idSuffix}` : `User ${id}${idSuffix}`;
+    const shortLabel = label.length > 60 ? `${label.slice(0, 57)}…` : label;
+    kb.text(shortLabel, cb.likerLikeBack(id)).row();
+  }
+  if (totalPages > 1) {
+    const hasPrev = safePage > 0;
+    const hasNext = safePage < totalPages - 1;
+    if (hasPrev) kb.text(t(lang, "likers.prev"), cb.likersPage(safePage - 1));
+    if (hasNext) kb.text(t(lang, "likers.next"), cb.likersPage(safePage + 1));
+    if (hasPrev || hasNext) kb.row();
+  }
+  return kb;
+}
+
+async function showLikers(ctx: MyContext, userId: number, page = 0, opts?: { edit?: boolean }) {
   const lang = await getLang(ctx);
-  await ctx.api.sendChatAction(ctx.chat!.id, "typing").catch(() => {});
+  if (!opts?.edit) await ctx.api.sendChatAction(ctx.chat!.id, "typing").catch(() => {});
   const ids = await listLikersNotMatched(userId);
   if (ids.length === 0) {
-    await ctx.reply(t(lang, "likers.none"));
+    if (opts?.edit) {
+      await ctx.editMessageText(t(lang, "likers.none"), { reply_markup: undefined }).catch(() => {});
+    } else {
+      await ctx.reply(t(lang, "likers.none"));
+    }
     return;
   }
-  const kb = new InlineKeyboard();
-  for (const id of ids.slice(0, 15)) {
-    const p = await getProfile(id);
-    const label = p ? `${p.display_name} (${p.age})` : `User ${id}`;
-    kb.text(label, cb.likerLikeBack(id)).row();
+  const truncated = ids.length >= LIKERS_MAX_LIST;
+  const text = likersListText(lang, ids, page, truncated);
+  const reply_markup = await buildLikersKeyboard(lang, ids, page);
+  if (opts?.edit) {
+    await ctx.editMessageText(text, { reply_markup }).catch(async () => {
+      await ctx.reply(text, { reply_markup });
+    });
+  } else {
+    await ctx.reply(text, { reply_markup });
   }
-  await ctx.reply(t(lang, "likers.title"), { reply_markup: kb });
 }
 
 async function setupUx(bot: Bot<MyContext>) {
@@ -1850,6 +1972,28 @@ export async function createBot() {
     if (isEndConversationText(txt)) {
       await endCurrentChat(ctx, u.id, s, chatLang);
       return;
+    }
+    if (s.payload.isMystery) {
+      if (matchesChatButton(txt, "chat.sendId")) {
+        const myTg = ctx.from?.id;
+        const partnerId = s.payload.withUserId;
+        const partnerTg = await getTelegramIdByUserId(partnerId);
+        const partnerUser = await getUserById(partnerId);
+        const partnerLang = partnerUser ? langFromDb(partnerUser.language) : chatLang;
+        if (myTg) {
+          await ctx.reply(tf(chatLang, "chat.idSent", { id: String(myTg) }));
+          if (partnerTg) {
+            await ctx.api
+              .sendMessage(partnerTg, tf(partnerLang, "chat.idReceived", { id: String(myTg) }))
+              .catch(() => {});
+          }
+        }
+        return;
+      }
+      if (matchesChatButton(txt, "chat.viewPartnerProfile")) {
+        await renderPartnerProfile(ctx, u.id, s.payload.withUserId, chatLang);
+        return;
+      }
     }
     if (s.payload.isMystery && s.payload.startedAt) {
       const lastActivityAt = s.payload.lastActivityAt ?? s.payload.startedAt;
@@ -2209,13 +2353,14 @@ export async function createBot() {
       const myPhoto = await getPrimaryPhoto(u.id);
       const theirPhoto = await getPrimaryPhoto(vp.partnerId);
       await ctx.reply(t(lang, "mystery.bothYes"));
+      const myTgId = await getTelegramIdByUserId(u.id);
       if (theirProf) {
-        const cap = formatMatchProfileCaption(lang, theirProf);
+        const cap = formatMatchProfileCaption(lang, theirProf, partnerTgId);
         if (theirPhoto) await ctx.replyWithPhoto(theirPhoto, { caption: cap }).catch(() => {});
         else await ctx.reply(cap).catch(() => {});
       }
       if (partnerTgId && myProf) {
-        const cap2 = formatMatchProfileCaption(partnerLang, myProf);
+        const cap2 = formatMatchProfileCaption(partnerLang, myProf, myTgId);
         await ctx.api.sendMessage(partnerTgId, t(partnerLang, "mystery.bothYes")).catch(() => {});
         if (myPhoto) await ctx.api.sendPhoto(partnerTgId, myPhoto, { caption: cap2 }).catch(() => {});
         else await ctx.api.sendMessage(partnerTgId, cap2).catch(() => {});
@@ -2448,7 +2593,7 @@ export async function createBot() {
     await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
   });
 
-  bot.callbackQuery(/^df:screen:(main|who|where|quality|interests)$/, async (ctx) => {
+  bot.callbackQuery(/^df:screen:(main|who|where|interests)$/, async (ctx) => {
     const u = await ensureDbUser(ctx);
     if (!u) return;
     const s = await getSession(u.id);
@@ -2616,14 +2761,13 @@ export async function createBot() {
     await ctx.reply(discoverFilterPrompt(lang, "age_range"));
   });
 
-  bot.callbackQuery("df:gender", async (ctx) => {
+  bot.callbackQuery(/^df:gender:(profile|male|female|other|any)$/, async (ctx) => {
     const u = await ensureDbUser(ctx);
     if (!u) return;
     const s = await getSession(u.id);
     const lang = await getLang(ctx);
     if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
-    const genderOrder: DiscoverFilterPayload["gender"][] = ["profile", "male", "female", "other", "any"];
-    const gender = genderOrder[(genderOrder.indexOf(s.payload.gender) + 1) % genderOrder.length]!;
+    const gender = ctx.match![1] as DiscoverFilterPayload["gender"];
     const filters: DiscoverFilterPayload = { ...trimFilterUiState(s.payload), gender };
     await ctx.answerCallbackQuery();
     await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
@@ -2791,6 +2935,15 @@ export async function createBot() {
     if (!u) return;
     await ctx.answerCallbackQuery();
     await showLikers(ctx, u.id);
+  });
+
+  bot.callbackQuery(/^likers:(\d+)$/, async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const page = Number(ctx.match?.[1] ?? "0");
+    if (!Number.isFinite(page) || page < 0) return;
+    await ctx.answerCallbackQuery();
+    await showLikers(ctx, u.id, page, { edit: true });
   });
 
   bot.callbackQuery(cb.share, async (ctx) => {

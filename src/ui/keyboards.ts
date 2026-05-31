@@ -54,6 +54,7 @@ export const cb = {
 
   matchChat: (userId: number) => `mchat:${userId}`,
   likerLikeBack: (userId: number) => `lkback:${userId}`,
+  likersPage: (page: number) => `likers:${page}`,
 };
 
 export function langKeyboard() {

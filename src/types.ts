@@ -121,7 +121,7 @@ export type DiscoverFilterPayload = {
   excludeCities?: string[];
   keyword?: string;
   interests?: string[];
-  screen?: "main" | "who" | "where" | "quality" | "interests";
+  screen?: "main" | "who" | "where" | "interests";
 };
 
 export type DiscoverFilterInputPayload = {

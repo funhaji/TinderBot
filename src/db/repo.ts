@@ -862,52 +862,26 @@ export async function discoveryCandidates(params: {
 export async function listLikersNotMatched(userId: number): Promise<number[]> {
   const res = await query<{ swiper_id: number }>(
     `
-    SELECT s.swiper_id
-    FROM swipes s
-    JOIN profiles me ON me.user_id = $1
-    JOIN profiles lik ON lik.user_id = s.swiper_id
-    WHERE s.target_id = $1 AND s.direction = 1
-      AND orientation_mutual_ok(
-        lik.preferences->>'orientation',
-        lik.gender::text,
-        me.preferences->>'orientation',
-        me.gender::text
-      )
-      AND (
-        me.preferences->'seek_genders' IS NULL
-        OR jsonb_typeof(me.preferences->'seek_genders') <> 'array'
-        OR jsonb_array_length(COALESCE(me.preferences->'seek_genders', '[]'::jsonb)) = 0
-        OR lik.gender IS NULL
-        OR (
-          (me.preferences->'seek_genders' @> '["m"]'::jsonb AND profile_phys_sex(lik.gender::text) = 'm')
-          OR (me.preferences->'seek_genders' @> '["f"]'::jsonb AND profile_phys_sex(lik.gender::text) = 'f')
-          OR (me.preferences->'seek_genders' @> '["x"]'::jsonb AND profile_phys_sex(lik.gender::text) IS NULL)
+    SELECT recent.swiper_id
+    FROM (
+      SELECT s.swiper_id, MAX(s.created_at) AS latest_at
+      FROM swipes s
+      WHERE s.target_id = $1 AND s.direction = 1
+        AND NOT EXISTS (
+          SELECT 1 FROM matches m
+          WHERE m.unmatched_at IS NULL
+            AND (
+              (m.user_a = $1 AND m.user_b = s.swiper_id)
+              OR (m.user_a = s.swiper_id AND m.user_b = $1)
+            )
         )
-      )
-      AND (
-        lik.preferences->'seek_genders' IS NULL
-        OR jsonb_typeof(lik.preferences->'seek_genders') <> 'array'
-        OR jsonb_array_length(COALESCE(lik.preferences->'seek_genders', '[]'::jsonb)) = 0
-        OR me.gender IS NULL
-        OR (
-          (lik.preferences->'seek_genders' @> '["m"]'::jsonb AND profile_phys_sex(me.gender::text) = 'm')
-          OR (lik.preferences->'seek_genders' @> '["f"]'::jsonb AND profile_phys_sex(me.gender::text) = 'f')
-          OR (lik.preferences->'seek_genders' @> '["x"]'::jsonb AND profile_phys_sex(me.gender::text) IS NULL)
-        )
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM matches m
-        WHERE m.unmatched_at IS NULL
-          AND (
-            (m.user_a = $1 AND m.user_b = s.swiper_id)
-            OR (m.user_a = s.swiper_id AND m.user_b = $1)
-          )
-      )
-      AND NOT EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = $1 AND b.blocked_id = s.swiper_id)
-      AND NOT EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = s.swiper_id AND b.blocked_id = $1)
-      AND EXISTS (SELECT 1 FROM users u WHERE u.id = s.swiper_id AND u.is_banned = false)
-    ORDER BY s.created_at DESC
-    LIMIT 30
+        AND NOT EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = $1 AND b.blocked_id = s.swiper_id)
+        AND NOT EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = s.swiper_id AND b.blocked_id = $1)
+        AND EXISTS (SELECT 1 FROM users u WHERE u.id = s.swiper_id AND u.is_banned = false)
+      GROUP BY s.swiper_id
+    ) recent
+    ORDER BY recent.latest_at DESC
+    LIMIT 100
   `,
     [userId]
   );
