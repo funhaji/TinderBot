@@ -80,13 +80,19 @@ export type DiscoverPayload = {
   filters?: DiscoverFilterPayload;
 };
 
-export type DiscoverAgeFilter = "profile" | "near" | "any";
-export type DiscoverGenderFilter = "profile" | "any";
+export type DiscoverAgeFilter = "profile" | "near" | "18_25" | "26_35" | "36_plus" | "any";
+export type DiscoverGenderFilter = "profile" | "male" | "female" | "other" | "any";
+export type DiscoverLookingForFilter = "compatible" | "friends" | "dating" | "any";
+export type DiscoverRadiusFilter = "profile" | "10" | "25" | "50" | "100" | "any";
 
 export type DiscoverFilterPayload = {
   sameCity: boolean;
+  sameCountry: boolean;
+  verifiedOnly: boolean;
   age: DiscoverAgeFilter;
   gender: DiscoverGenderFilter;
+  lookingFor: DiscoverLookingForFilter;
+  radius: DiscoverRadiusFilter;
 };
 
 export type ChatPayload = {

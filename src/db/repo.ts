@@ -606,9 +606,12 @@ export async function discoveryCandidates(params: {
   lon: number | null;
   radiusMeters: number;
   limit: number;
-  ageFilter?: "profile" | "near" | "any";
-  genderFilter?: "profile" | "any";
+  ageFilter?: "profile" | "near" | "18_25" | "26_35" | "36_plus" | "any";
+  genderFilter?: "profile" | "male" | "female" | "other" | "any";
   sameCity?: boolean;
+  sameCountry?: boolean;
+  verifiedOnly?: boolean;
+  lookingForFilter?: "compatible" | "friends" | "dating" | "any";
 }): Promise<number[]> {
   const res = await query<{ id: number }>(
     `
@@ -644,6 +647,9 @@ export async function discoveryCandidates(params: {
       AND (
         $4::text = 'any'
         OR ($4::text = 'near' AND ABS(p.age - me.age) <= 5)
+        OR ($4::text = '18_25' AND p.age BETWEEN 18 AND 25)
+        OR ($4::text = '26_35' AND p.age BETWEEN 26 AND 35)
+        OR ($4::text = '36_plus' AND p.age >= 36)
         OR (
           $4::text = 'profile'
           AND p.age >= COALESCE((me.preferences->>'age_min')::int, 15)
@@ -660,6 +666,9 @@ export async function discoveryCandidates(params: {
       )
       AND (
         $5::text = 'any'
+        OR ($5::text = 'male' AND profile_phys_sex(p.gender::text) = 'm')
+        OR ($5::text = 'female' AND profile_phys_sex(p.gender::text) = 'f')
+        OR ($5::text = 'other' AND profile_phys_sex(p.gender::text) IS NULL)
         OR (
           me.preferences->'seek_genders' IS NULL
           OR jsonb_typeof(me.preferences->'seek_genders') <> 'array'
@@ -684,9 +693,23 @@ export async function discoveryCandidates(params: {
         )
       )
       AND (
-        COALESCE(me.preferences->>'looking_for', 'both') = 'both'
-        OR COALESCE(p.preferences->>'looking_for', 'both') = 'both'
-        OR COALESCE(me.preferences->>'looking_for', 'both') = COALESCE(p.preferences->>'looking_for', 'both')
+        $8::text = 'any'
+        OR (
+          $8::text = 'compatible'
+          AND (
+            COALESCE(me.preferences->>'looking_for', 'both') = 'both'
+            OR COALESCE(p.preferences->>'looking_for', 'both') = 'both'
+            OR COALESCE(me.preferences->>'looking_for', 'both') = COALESCE(p.preferences->>'looking_for', 'both')
+          )
+        )
+        OR (
+          $8::text = 'friends'
+          AND COALESCE(p.preferences->>'looking_for', 'both') IN ('friends', 'both')
+        )
+        OR (
+          $8::text = 'dating'
+          AND COALESCE(p.preferences->>'looking_for', 'both') IN ('dating', 'both')
+        )
       )
       AND (
         me.location_lat IS NULL OR me.location_lon IS NULL OR p.location_lat IS NULL OR p.location_lon IS NULL
@@ -700,15 +723,21 @@ export async function discoveryCandidates(params: {
               * sin(radians(p.location_lat::double precision))
             ))
           )
-        ) <= LEAST(
-          $3::double precision,
-          COALESCE((me.preferences->>'discovery_radius_m')::double precision, $3::double precision)
-        )
+        ) <= $3::double precision
       )
       AND (
         $6::boolean = false
         OR COALESCE(me.city, '') = ''
         OR LOWER(COALESCE(p.city, '')) = LOWER(COALESCE(me.city, ''))
+      )
+      AND (
+        $7::boolean = false
+        OR COALESCE(me.preferences->>'country', '') = ''
+        OR LOWER(COALESCE(p.preferences->>'country', '')) = LOWER(COALESCE(me.preferences->>'country', ''))
+      )
+      AND (
+        $9::boolean = false
+        OR u.badge_verified = true
       )
     ORDER BY
       CASE
@@ -742,6 +771,9 @@ export async function discoveryCandidates(params: {
       params.ageFilter ?? "profile",
       params.genderFilter ?? "profile",
       params.sameCity === true,
+      params.sameCountry === true,
+      params.lookingForFilter ?? "compatible",
+      params.verifiedOnly === true,
     ]
   );
   return res.rows.map((r) => r.id);
