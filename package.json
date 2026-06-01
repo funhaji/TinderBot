@@ -1,32 +1,28 @@
 {
-  "name": "telegram-friend-finding-bot",
-  "version": "0.1.0",
+  "name": "telegram-seller-bot",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
-  "engines": {
-    "node": ">=20"
-  },
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "start": "node dist/index.js",
-    "build": "tsc -p tsconfig.json",
-    "migrate": "node dist/db/migrate.js",
-    "migrate:dev": "tsx src/db/migrate.ts"
+    "build": "./node_modules/.bin/tsc -p tsconfig.json && cp public/*.html public/*.js public/*.css dist/ 2>/dev/null; true",
+    "typecheck": "./node_modules/.bin/tsc --noEmit",
+    "lint": "npm run typecheck",
+    "start": "node --dns-result-order=ipv4first dist/server.js",
+    "dev": "node --dns-result-order=ipv4first --watch dist/server.js"
   },
   "dependencies": {
-    "dotenv": "^16.6.1",
-    "global-agent": "^3.0.0",
-    "grammy": "^1.36.1",
-    "jalaali-js": "^1.2.8",
-    "pg": "^8.16.3",
-    "pino": "^9.9.0",
-    "zod": "^4.1.5"
+    "@neondatabase/serverless": "^0.10.4",
+    "@vercel/node": "^3.2.17",
+    "https-proxy-agent": "^7.0.4",
+    "node-fetch": "^3.3.2",
+    "postgres": "^3.4.5",
+    "socks-proxy-agent": "^8.0.5",
+    "ssh2": "^1.16.0",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
-    "@types/node": "^22.15.3",
-    "@types/pg": "^8.15.4",
-    "tsx": "^4.19.4",
-    "typescript": "^5.9.2"
+    "@types/node": "^22.10.2",
+    "@types/ssh2": "^1.15.0",
+    "typescript": "^5.7.2"
   }
 }
-
