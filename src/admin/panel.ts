@@ -101,6 +101,10 @@ const adm = {
   dimd: "adm:dimd",
   editMessages: "adm:msgedit",
   buttonEditor: "btnedit:menu",
+  reminders: "adm:reminders",
+  reminder: (day: 3 | 7 | 14) => `adm:rem:${day}`,
+  reminderToggle: (day: 3 | 7 | 14) => `adm:remt:${day}`,
+  reminderEdit: (day: 3 | 7 | 14) => `adm:reme:${day}`,
   msgPick: (key: string) => `adm:msp:${key}`,
   sendUser: "adm:su",
   rewardNew: "adm:rw",
@@ -385,6 +389,8 @@ export function adminPageKb(lang: Language, page: number): InlineKeyboard {
       .text(t(lang, "admin.editMessages"), adm.editMessages)
       .row()
       .text("✏️ " + (lang === "fa" ? "ویرایش دکمه‌ها" : "Edit Buttons"), adm.buttonEditor)
+      .row()
+      .text("⏰ " + (lang === "fa" ? "یادآوری عدم فعالیت" : "Inactivity Reminders"), adm.reminders)
       .row()
       .text(t(lang, "admin.referralRewards"), adm.rewardNew)
       .text(t(lang, "admin.rewardList"), adm.rewardList)
@@ -795,6 +801,34 @@ export async function tryHandleAdminFollowupMessage(
   // Handle button editor messages
   if (s.state === "admin_button_edit") {
     return await handleButtonEditMessage(ctx, u, s, lang);
+  }
+
+  // Handle reminder editor messages
+  if (s.state === "admin_reminder_edit") {
+    const { day, step, textFa } = s.payload as { day: 3 | 7 | 14; step: "fa" | "en"; textFa?: string };
+    
+    if (txt === "/cancel") {
+      await setSession(u.id, { state: "idle", payload: {} });
+      await ctx.reply(t(lang, "admin.broadcastCancelled"));
+      return true;
+    }
+    
+    if (step === "fa") {
+      await setSession(u.id, {
+        state: "admin_reminder_edit",
+        payload: { day, step: "en", textFa: txt },
+      });
+      await ctx.reply(lang === "fa" ? `✅ متن فارسی ثبت شد.\n\nحالا متن انگلیسی را بفرستید:` : `✅ Persian text saved.\n\nNow send English text:`);
+      return true;
+    }
+    
+    if (step === "en" && textFa) {
+      await setSystemSetting(`reminder_${day}day_fa`, textFa);
+      await setSystemSetting(`reminder_${day}day_en`, txt);
+      await setSession(u.id, { state: "idle", payload: {} });
+      await ctx.reply(lang === "fa" ? `✅ یادآوری ${day} روزه ذخیره شد!` : `✅ ${day}-day reminder saved!`);
+      return true;
+    }
   }
 
   return false;
@@ -1484,4 +1518,111 @@ export function setupAdmin(bot: Bot<MyContext>) {
       show_alert: false,
     });
   });
+
+  // Reminder handlers
+  bot.callbackQuery(adm.reminders, async (ctx) => {
+    if (!isPanelAdmin(ctx.from?.id)) return;
+    const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+    const kb = new InlineKeyboard();
+    
+    kb.text(lang === "fa" ? "⏰ یادآوری 3 روزه" : "⏰ 3-Day Reminder", adm.reminder(3)).row();
+    kb.text(lang === "fa" ? "⏰ یادآوری 7 روزه" : "⏰ 7-Day Reminder", adm.reminder(7)).row();
+    kb.text(lang === "fa" ? "⏰ یادآوری 14 روزه" : "⏰ 14-Day Reminder", adm.reminder(14)).row();
+    kb.text(t(lang, "admin.back"), "adm:pg:2");
+    
+    const title = lang === "fa"
+      ? "⏰ مدیریت یادآوری عدم فعالیت\n\nیک گزینه را انتخاب کنید:"
+      : "⏰ Inactivity Reminder Management\n\nSelect an option:";
+    
+    await ctx.editMessageText(title, { reply_markup: kb });
+    await ctx.answerCallbackQuery();
+  });
+
+  [3, 7, 14].forEach((day) => {
+    bot.callbackQuery(adm.reminder(day as 3 | 7 | 14), async (ctx) => {
+      if (!isPanelAdmin(ctx.from?.id)) return;
+      const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+      
+      const enabled = await getSystemSettingBool(`reminder_${day}day_enabled`, false);
+      const textFa = await getSystemSettingString(`reminder_${day}day_fa`, "");
+      const textEn = await getSystemSettingString(`reminder_${day}day_en`, "");
+      
+      const status = enabled 
+        ? (lang === "fa" ? "✅ فعال" : "✅ Enabled")
+        : (lang === "fa" ? "❌ غیرفعال" : "❌ Disabled");
+      
+      const message = lang === "fa"
+        ? `⏰ یادآوری ${day} روزه\n\nوضعیت: ${status}\n\nمتن فارسی:\n${textFa || "(تنظیم نشده)"}\n\nمتن انگلیسی:\n${textEn || "(not set)"}`
+        : `⏰ ${day}-Day Reminder\n\nStatus: ${status}\n\nPersian text:\n${textFa || "(not set)"}\n\nEnglish text:\n${textEn || "(not set)"}`;
+      
+      const kb = new InlineKeyboard();
+      kb.text(
+        enabled 
+          ? (lang === "fa" ? "❌ غیرفعال کردن" : "❌ Disable")
+          : (lang === "fa" ? "✅ فعال کردن" : "✅ Enable"),
+        adm.reminderToggle(day as 3 | 7 | 14)
+      ).row();
+      kb.text(lang === "fa" ? "✏️ ویرایش متن" : "✏️ Edit Text", adm.reminderEdit(day as 3 | 7 | 14)).row();
+      kb.text(t(lang, "admin.back"), adm.reminders);
+      
+      await ctx.editMessageText(message, { reply_markup: kb });
+      await ctx.answerCallbackQuery();
+    });
+    
+    bot.callbackQuery(adm.reminderToggle(day as 3 | 7 | 14), async (ctx) => {
+      if (!isPanelAdmin(ctx.from?.id)) return;
+      const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+      
+      const enabled = await getSystemSettingBool(`reminder_${day}day_enabled`, false);
+      await setSystemSetting(`reminder_${day}day_enabled`, !enabled);
+      
+      await ctx.answerCallbackQuery({ text: "✅ " + (lang === "fa" ? "به‌روزرسانی شد" : "Updated") });
+      
+      // Refresh the view
+      const textFa = await getSystemSettingString(`reminder_${day}day_fa`, "");
+      const textEn = await getSystemSettingString(`reminder_${day}day_en`, "");
+      const newEnabled = !enabled;
+      
+      const status = newEnabled 
+        ? (lang === "fa" ? "✅ فعال" : "✅ Enabled")
+        : (lang === "fa" ? "❌ غیرفعال" : "❌ Disabled");
+      
+      const message = lang === "fa"
+        ? `⏰ یادآوری ${day} روزه\n\nوضعیت: ${status}\n\nمتن فارسی:\n${textFa || "(تنظیم نشده)"}\n\nمتن انگلیسی:\n${textEn || "(not set)"}`
+        : `⏰ ${day}-Day Reminder\n\nStatus: ${status}\n\nPersian text:\n${textFa || "(not set)"}\n\nEnglish text:\n${textEn || "(not set)"}`;
+      
+      const kb = new InlineKeyboard();
+      kb.text(
+        newEnabled 
+          ? (lang === "fa" ? "❌ غیرفعال کردن" : "❌ Disable")
+          : (lang === "fa" ? "✅ فعال کردن" : "✅ Enable"),
+        adm.reminderToggle(day as 3 | 7 | 14)
+      ).row();
+      kb.text(lang === "fa" ? "✏️ ویرایش متن" : "✏️ Edit Text", adm.reminderEdit(day as 3 | 7 | 14)).row();
+      kb.text(t(lang, "admin.back"), adm.reminders);
+      
+      await ctx.editMessageText(message, { reply_markup: kb });
+    });
+    
+    bot.callbackQuery(adm.reminderEdit(day as 3 | 7 | 14), async (ctx) => {
+      if (!isPanelAdmin(ctx.from?.id)) return;
+      const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+      
+      const u = ctx.from ? await getUserByTelegramId(ctx.from.id) : null;
+      if (!u) return;
+      
+      await setSession(u.id, {
+        state: "admin_reminder_edit",
+        payload: { day: day as 3 | 7 | 14, step: "fa" },
+      });
+      
+      const prompt = lang === "fa"
+        ? `✏️ ویرایش یادآوری ${day} روزه\n\nمتن فارسی را بفرستید:\n(یا /cancel برای لغو)`
+        : `✏️ Edit ${day}-Day Reminder\n\nSend Persian text:\n(or /cancel to abort)`;
+      
+      await ctx.reply(prompt);
+      await ctx.answerCallbackQuery();
+    });
+  });
 }
+
