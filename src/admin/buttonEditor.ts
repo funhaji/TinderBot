@@ -4,7 +4,7 @@ import type { Language, MyContext, SessionState } from "../types.js";
 import { t, tf } from "../i18n/index.js";
 import { getBotConfig, setBotConfigDocument, invalidateBotConfigCache } from "../config/botContent.js";
 import { resolveAdminLang } from "./lang.js";
-import { setSession, getSession, getUserById } from "../db/repo.js";
+import { setSession, getSession, getUserById, getUserByTelegramId } from "../db/repo.js";
 import { isPanelAdmin } from "../config/access.js";
 import { logger } from "../logger.js";
 
@@ -137,9 +137,10 @@ export async function startEditButton(
     const config = await getBotConfig();
     logger.info({ section, row, col }, "got_bot_config");
     
-    const u = ctx.from ? await getUserById(ctx.from.id) : null;
+    // FIXED: Use getUserByTelegramId instead of getUserById
+    const u = ctx.from ? await getUserByTelegramId(ctx.from.id) : null;
     if (!u) {
-      logger.error({ userId: ctx.from?.id }, "user_not_found_in_db");
+      logger.error({ telegramId: ctx.from?.id }, "user_not_found_in_db");
       await ctx.answerCallbackQuery({ text: "User not found", show_alert: true });
       return;
     }
