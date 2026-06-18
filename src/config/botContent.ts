@@ -138,7 +138,7 @@ export const DEFAULT_BOT_CONFIG: BotConfigDocument = {
     rows: [
       [
         { key: "dislike", fa: "دیسلایک 👎", en: "Dislike 👎" },
-        { key: "like_direct", fa: "لایک + چت 💌", en: "Like + chat 💌" },
+        { key: "like_direct", fa: "لایک + دایرکت 💌", en: "Like + Direct Message 💌" },
         { key: "like", fa: "لایک ❤️", en: "Like ❤️" },
       ],
       [

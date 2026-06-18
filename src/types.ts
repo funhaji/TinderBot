@@ -88,9 +88,26 @@ export type DiscoverPayload = {
   cardMessageId?: number;
   sub?: "main" | "more";
   filters?: DiscoverFilterPayload;
+  queueStartedAt?: number;
 };
 
-export type DiscoverAgeFilter = "profile" | "near" | "18_25" | "26_35" | "36_plus" | "any";
+export type DiscoverAgeFilter = 
+  | "profile" 
+  | "near" 
+  | "any"
+  | "18_22" 
+  | "23_27" 
+  | "28_32" 
+  | "33_37" 
+  | "38_42" 
+  | "43_47" 
+  | "48_52" 
+  | "53_57" 
+  | "58_62" 
+  | "63_67" 
+  | "68_72" 
+  | "73_77" 
+  | "78_plus";
 export type DiscoverGenderFilter = "profile" | "male" | "female" | "other" | "any";
 export type DiscoverLookingForFilter = "compatible" | "friends" | "dating" | "any";
 export type DiscoverRadiusFilter = "profile" | "10" | "25" | "50" | "100" | "any";

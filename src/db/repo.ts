@@ -56,11 +56,12 @@ export async function upsertUser(params: {
 }): Promise<DbUser> {
   const res = await query<DbUser>(
     `
-    INSERT INTO users (telegram_id, username, referred_by, last_seen_at)
-    VALUES ($1, $2, $3, now())
+    INSERT INTO users (telegram_id, username, referred_by, last_seen_at, last_activity_at)
+    VALUES ($1, $2, $3, now(), now())
     ON CONFLICT (telegram_id) DO UPDATE
       SET username = EXCLUDED.username,
           last_seen_at = now(),
+          last_activity_at = now(),
           referred_by = COALESCE(users.referred_by, EXCLUDED.referred_by)
     RETURNING id, telegram_id, username, language, is_banned,
       diamond_balance, face_verification_status, referral_bonus_paid, referred_by,
@@ -667,13 +668,43 @@ export async function discoveryCandidates(params: {
           $4::int IS NULL AND $5::int IS NULL AND $6::text = 'near' AND ABS(p.age - me.age) <= 5
         )
         OR (
-          $4::int IS NULL AND $5::int IS NULL AND $6::text = '18_25' AND p.age BETWEEN 18 AND 25
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = '18_22' AND p.age BETWEEN 18 AND 22
         )
         OR (
-          $4::int IS NULL AND $5::int IS NULL AND $6::text = '26_35' AND p.age BETWEEN 26 AND 35
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = '23_27' AND p.age BETWEEN 23 AND 27
         )
         OR (
-          $4::int IS NULL AND $5::int IS NULL AND $6::text = '36_plus' AND p.age >= 36
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = '28_32' AND p.age BETWEEN 28 AND 32
+        )
+        OR (
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = '33_37' AND p.age BETWEEN 33 AND 37
+        )
+        OR (
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = '38_42' AND p.age BETWEEN 38 AND 42
+        )
+        OR (
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = '43_47' AND p.age BETWEEN 43 AND 47
+        )
+        OR (
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = '48_52' AND p.age BETWEEN 48 AND 52
+        )
+        OR (
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = '53_57' AND p.age BETWEEN 53 AND 57
+        )
+        OR (
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = '58_62' AND p.age BETWEEN 58 AND 62
+        )
+        OR (
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = '63_67' AND p.age BETWEEN 63 AND 67
+        )
+        OR (
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = '68_72' AND p.age BETWEEN 68 AND 72
+        )
+        OR (
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = '73_77' AND p.age BETWEEN 73 AND 77
+        )
+        OR (
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = '78_plus' AND p.age >= 78
         )
         OR (
           $4::int IS NULL AND $5::int IS NULL AND $6::text = 'profile'

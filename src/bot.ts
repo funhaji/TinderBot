@@ -277,6 +277,67 @@ function langFromDb(v: unknown): Language {
   return v === "fa" ? "fa" : "en";
 }
 
+/**
+ * Format a redesigned like notification (Feature 6)
+ * 
+ * Without message: "❤️ A woman from Tehran, Iran liked your profile!"
+ * With message: "#new ❤️ Sara (32) liked your profile and sent you a direct message:\nHello"
+ * 
+ * @param lang User's language preference
+ * @param likerProfile Profile of the person who liked
+ * @param message Optional direct message content (null for simple like)
+ * @returns Formatted notification string
+ */
+function formatLikeNotification(
+  lang: Language,
+  likerProfile: ProfileRow | null,
+  message: string | null
+): string {
+  if (!likerProfile) {
+    // Fallback if profile not found
+    return lang === "fa" ? "❤️ یک نفر پروفایل شما را لایک کرد!" : "❤️ Someone liked your profile!";
+  }
+
+  const prefs = likerProfile.preferences ?? {};
+  const gender = likerProfile.gender;
+  const city = likerProfile.city;
+  const country = prefs.country || "";
+  const name = likerProfile.display_name;
+  const age = likerProfile.age;
+
+  // Determine gender label for anonymous notification
+  let genderLabel = "";
+  if (lang === "fa") {
+    if (gender === "m" || gender === "male") genderLabel = "یک پسر";
+    else if (gender === "f" || gender === "female") genderLabel = "یک دختر";
+    else genderLabel = "یک نفر";
+  } else {
+    if (gender === "m" || gender === "male") genderLabel = "a man";
+    else if (gender === "f" || gender === "female") genderLabel = "a woman";
+    else genderLabel = "someone";
+  }
+
+  if (message) {
+    // With direct message: show name, age, and message
+    const truncatedMessage = message.length > 100 ? message.substring(0, 100) + "..." : message;
+    
+    if (lang === "fa") {
+      return `#new ❤️ ${name} (${age}) پروفایل شما را لایک کرد و یک پیام مستقیم فرستاد:\n${truncatedMessage}`;
+    } else {
+      return `#new ❤️ ${name} (${age}) liked your profile and sent you a direct message:\n${truncatedMessage}`;
+    }
+  } else {
+    // Without message: show gender, location
+    const location = country ? `${city}, ${country}` : city;
+    
+    if (lang === "fa") {
+      return `❤️ ${genderLabel} از ${location} پروفایل شما را لایک کرد!`;
+    } else {
+      return `❤️ ${genderLabel.charAt(0).toUpperCase() + genderLabel.slice(1)} from ${location} liked your profile!`;
+    }
+  }
+}
+
 async function getLang(ctx: MyContext): Promise<Language> {
   const tgId = ctx.from?.id;
   if (!tgId) return "en";
@@ -1038,13 +1099,35 @@ function discoverAgeLabel(lang: Language, filters: DiscoverFilterPayload): strin
         ? "discover.filter.age.profile"
         : filters.age === "near"
           ? "discover.filter.age.near"
-          : filters.age === "18_25"
-            ? "discover.filter.age.18_25"
-            : filters.age === "26_35"
-              ? "discover.filter.age.26_35"
-              : filters.age === "36_plus"
-                ? "discover.filter.age.36_plus"
-                : "discover.filter.age.any";
+          : filters.age === "any"
+            ? "discover.filter.age.any"
+            : filters.age === "18_22"
+              ? "discover.filter.age.18_22"
+              : filters.age === "23_27"
+                ? "discover.filter.age.23_27"
+                : filters.age === "28_32"
+                  ? "discover.filter.age.28_32"
+                  : filters.age === "33_37"
+                    ? "discover.filter.age.33_37"
+                    : filters.age === "38_42"
+                      ? "discover.filter.age.38_42"
+                      : filters.age === "43_47"
+                        ? "discover.filter.age.43_47"
+                        : filters.age === "48_52"
+                          ? "discover.filter.age.48_52"
+                          : filters.age === "53_57"
+                            ? "discover.filter.age.53_57"
+                            : filters.age === "58_62"
+                              ? "discover.filter.age.58_62"
+                              : filters.age === "63_67"
+                                ? "discover.filter.age.63_67"
+                                : filters.age === "68_72"
+                                  ? "discover.filter.age.68_72"
+                                  : filters.age === "73_77"
+                                    ? "discover.filter.age.73_77"
+                                    : filters.age === "78_plus"
+                                      ? "discover.filter.age.78_plus"
+                                      : "discover.filter.age.any";
   return ageKey
     ? t(lang, ageKey)
     : tf(lang, "discover.filter.age.custom", { min: filters.ageMin ?? 18, max: filters.ageMax ?? 99 });
@@ -1300,6 +1383,13 @@ async function discoverCore(ctx: MyContext, userId: number, filters: DiscoverFil
   await ctx.api.sendChatAction(ctx.chat!.id, "typing").catch(() => {});
   const p = await getProfile(userId);
   if (!p) return;
+  
+  // Check if we're retrying after timeout
+  const s = await getSession(userId);
+  const queueStartedAt = s.state === "discover" && s.payload.queueStartedAt 
+    ? s.payload.queueStartedAt 
+    : Date.now();
+  
   const radius = discoverRadiusMeters(p, filters.radius);
   const candidates = await discoveryCandidates({
     meId: userId,
@@ -1324,14 +1414,55 @@ async function discoverCore(ctx: MyContext, userId: number, filters: DiscoverFil
     recentActivityDays: discoverActivityDays(filters.recentActivity),
     lookingForFilter: filters.lookingFor,
   });
+  
   if (candidates.length === 0) {
+    // Check if 2 minutes have passed and filters are active
+    const hasActiveFilters = 
+      filters.age !== "any" || 
+      filters.gender !== "any" ||
+      filters.sameCity || 
+      filters.sameCountry ||
+      filters.verifiedOnly ||
+      filters.photoOnly ||
+      (filters.ageMin != null || filters.ageMax != null) ||
+      (filters.country != null && filters.country.trim() !== "") ||
+      (filters.includeCities && filters.includeCities.length > 0) ||
+      (filters.excludeCountries && filters.excludeCountries.length > 0) ||
+      (filters.excludeCities && filters.excludeCities.length > 0) ||
+      (filters.keyword && filters.keyword.trim() !== "") ||
+      (filters.interests && filters.interests.length > 0);
+    
+    const elapsedMs = Date.now() - queueStartedAt;
+    const twoMinutes = 2 * 60 * 1000;
+    
+    if (hasActiveFilters && elapsedMs >= twoMinutes) {
+      // Show timeout prompt with option to remove filters
+      const kb = new InlineKeyboard()
+        .text(t(lang, "discover.removeFilters"), "df:timeout:remove")
+        .row()
+        .text(t(lang, "discover.keepFilters"), "df:timeout:keep");
+      
+      await setSession(userId, { 
+        state: "discover", 
+        payload: { candidates: [], idx: 0, sub: "main", filters, queueStartedAt } 
+      });
+      
+      await ctx.reply(t(lang, "discover.noMatchTimeout"), { reply_markup: kb });
+      return;
+    }
+    
+    // No timeout yet or no filters, show normal "no candidates" message
     await setSession(userId, { state: "discover_filter", payload: filters });
     await ctx.reply(`${t(lang, "discover.noCandidates")}\n\n${t(lang, "discover.filter.prompt")}`, {
       reply_markup: discoverFilterKeyboard(lang, filters),
     });
     return;
   }
-  await setSession(userId, { state: "discover", payload: { candidates, idx: 0, sub: "main", filters } });
+  
+  await setSession(userId, { 
+    state: "discover", 
+    payload: { candidates, idx: 0, sub: "main", filters, queueStartedAt } 
+  });
   await renderDiscoverCard(ctx, userId);
 }
 
@@ -1543,8 +1674,11 @@ async function handleSwipe(ctx: MyContext, direction: 1 | 2) {
         const myP = await getProfile(u.id);
         const targetUser = await getUserById(targetId);
         const tl = langFromDb(targetUser?.language ?? "en");
+        
+        // Redesigned like notification (Feature 6)
+        const likeNotification = formatLikeNotification(tl, myP, null);
         await ctx.api
-          .sendMessage(likeTg, `${myP?.display_name ?? (tl === "fa" ? "یک نفر" : "Someone")} ❤️`)
+          .sendMessage(likeTg, likeNotification)
           .catch(() => {});
       }
     }
@@ -1976,15 +2110,27 @@ export async function createBot() {
     if (s.payload.isMystery) {
       if (matchesChatButton(txt, "chat.sendId")) {
         const myTg = ctx.from?.id;
+        const myUsername = ctx.from?.username;
         const partnerId = s.payload.withUserId;
         const partnerTg = await getTelegramIdByUserId(partnerId);
         const partnerUser = await getUserById(partnerId);
         const partnerLang = partnerUser ? langFromDb(partnerUser.language) : chatLang;
-        if (myTg) {
-          await ctx.reply(tf(chatLang, "chat.idSent", { id: String(myTg) }));
+        
+        // Send username if available, otherwise send fallback message
+        if (myUsername) {
+          const usernameText = `@${myUsername}`;
+          await ctx.reply(tf(chatLang, "chat.usernameSent", { username: usernameText }));
           if (partnerTg) {
             await ctx.api
-              .sendMessage(partnerTg, tf(partnerLang, "chat.idReceived", { id: String(myTg) }))
+              .sendMessage(partnerTg, tf(partnerLang, "chat.usernameReceived", { username: usernameText }))
+              .catch(() => {});
+          }
+        } else {
+          // No username available - send fallback message
+          await ctx.reply(t(chatLang, "chat.noUsername"));
+          if (partnerTg) {
+            await ctx.api
+              .sendMessage(partnerTg, t(partnerLang, "chat.partnerNoUsername"))
               .catch(() => {});
           }
         }
@@ -2740,7 +2886,12 @@ export async function createBot() {
     const s = await getSession(u.id);
     const lang = await getLang(ctx);
     if (s.state !== "discover_filter") return void (await ctx.answerCallbackQuery());
-    const ageOrder: DiscoverFilterPayload["age"][] = ["profile", "near", "18_25", "26_35", "36_plus", "any"];
+    const ageOrder: DiscoverFilterPayload["age"][] = [
+      "profile", "near", "any",
+      "18_22", "23_27", "28_32", "33_37", "38_42",
+      "43_47", "48_52", "53_57", "58_62", "63_67",
+      "68_72", "73_77", "78_plus"
+    ];
     const age = ageOrder[(ageOrder.indexOf(s.payload.age) + 1) % ageOrder.length]!;
     const filters: DiscoverFilterPayload = { ...trimFilterUiState(s.payload), age, ageMin: null, ageMax: null };
     await ctx.answerCallbackQuery();
@@ -2914,6 +3065,33 @@ export async function createBot() {
     await ctx.answerCallbackQuery();
     await clearPressedInlineKeyboard(ctx);
     await discoverCore(ctx, u.id, trimFilterUiState(s.payload));
+  });
+
+  bot.callbackQuery("df:timeout:remove", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    if (s.state !== "discover") return void (await ctx.answerCallbackQuery());
+    await ctx.answerCallbackQuery();
+    await clearPressedInlineKeyboard(ctx);
+    // Remove all filters and search again
+    await discoverCore(ctx, u.id, defaultDiscoverFilters());
+  });
+
+  bot.callbackQuery("df:timeout:keep", async (ctx) => {
+    const u = await ensureDbUser(ctx);
+    if (!u) return;
+    const s = await getSession(u.id);
+    if (s.state !== "discover") return void (await ctx.answerCallbackQuery());
+    await ctx.answerCallbackQuery();
+    await clearPressedInlineKeyboard(ctx);
+    const lang = await getLang(ctx);
+    // Keep filters, send back to filter screen
+    const filters = s.payload.filters || defaultDiscoverFilters();
+    await setSession(u.id, { state: "discover_filter", payload: filters });
+    await ctx.reply(t(lang, "discover.filter.prompt"), {
+      reply_markup: discoverFilterKeyboard(lang, filters),
+    });
   });
 
   bot.callbackQuery(cb.discover, async (ctx) => {
