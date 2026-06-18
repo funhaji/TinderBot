@@ -131,47 +131,71 @@ export async function startEditButton(
   col: number,
   lang: Language
 ) {
-  const config = await getBotConfig();
-  const u = ctx.from ? await getUserById(ctx.from.id) : null;
-  if (!u) return;
-  
-  let button;
-  if (section === "home_menu") {
-    button = config.home_menu.rows[row]?.[col];
-  } else if (section === "explorer_main") {
-    button = config.explorer_main.rows[row]?.[col];
-  } else if (section === "explorer_more") {
-    button = config.explorer_more.rows[row]?.[col];
+  try {
+    logger.info({ userId: ctx.from?.id, section, row, col }, "start_edit_button_called");
+    
+    const config = await getBotConfig();
+    logger.info({ section, row, col }, "got_bot_config");
+    
+    const u = ctx.from ? await getUserById(ctx.from.id) : null;
+    if (!u) {
+      logger.error({ userId: ctx.from?.id }, "user_not_found_in_db");
+      await ctx.answerCallbackQuery({ text: "User not found", show_alert: true });
+      return;
+    }
+    
+    logger.info({ userId: u.id, section, row, col }, "got_user_from_db");
+    
+    let button;
+    if (section === "home_menu") {
+      button = config.home_menu.rows[row]?.[col];
+    } else if (section === "explorer_main") {
+      button = config.explorer_main.rows[row]?.[col];
+    } else if (section === "explorer_more") {
+      button = config.explorer_more.rows[row]?.[col];
+    }
+    
+    if (!button) {
+      logger.error({ section, row, col }, "button_not_found_in_config");
+      await ctx.answerCallbackQuery({ text: "❌ Button not found", show_alert: true });
+      return;
+    }
+    
+    logger.info({ section, row, col, buttonFa: button.fa }, "found_button");
+    
+    // Store edit state
+    await setSession(u.id, {
+      state: "admin_button_edit",
+      payload: { section, row, col, step: "fa" },
+    });
+    
+    logger.info({ userId: u.id, section, row, col }, "session_state_set");
+    
+    const currentFa = button.fa;
+    const currentEn = button.en;
+    
+    const prompt = lang === "fa"
+      ? `✏️ ویرایش دکمه\n\n` +
+        `متن فعلی (فارسی): ${currentFa}\n` +
+        `متن فعلی (انگلیسی): ${currentEn}\n\n` +
+        `متن جدید فارسی را بفرستید:\n` +
+        `(یا /cancel برای لغو)`
+      : `✏️ Edit Button\n\n` +
+        `Current text (Persian): ${currentFa}\n` +
+        `Current text (English): ${currentEn}\n\n` +
+        `Send new Persian text:\n` +
+        `(or /cancel to abort)`;
+    
+    logger.info({ userId: u.id }, "sending_prompt");
+    await ctx.reply(prompt);
+    logger.info({ userId: u.id }, "prompt_sent");
+    
+    await ctx.answerCallbackQuery();
+    logger.info({ userId: u.id }, "callback_answered");
+  } catch (err) {
+    logger.error({ err, userId: ctx.from?.id, section, row, col }, "start_edit_button_error");
+    await ctx.answerCallbackQuery({ text: "Error: " + (err instanceof Error ? err.message : "Unknown"), show_alert: true }).catch(() => {});
   }
-  
-  if (!button) {
-    await ctx.answerCallbackQuery({ text: "❌ Button not found", show_alert: true });
-    return;
-  }
-  
-  // Store edit state
-  await setSession(u.id, {
-    state: "admin_button_edit",
-    payload: { section, row, col, step: "fa" },
-  });
-  
-  const currentFa = button.fa;
-  const currentEn = button.en;
-  
-  const prompt = lang === "fa"
-    ? `✏️ ویرایش دکمه\n\n` +
-      `متن فعلی (فارسی): ${currentFa}\n` +
-      `متن فعلی (انگلیسی): ${currentEn}\n\n` +
-      `متن جدید فارسی را بفرستید:\n` +
-      `(یا /cancel برای لغو)`
-    : `✏️ Edit Button\n\n` +
-      `Current text (Persian): ${currentFa}\n` +
-      `Current text (English): ${currentEn}\n\n` +
-      `Send new Persian text:\n` +
-      `(or /cancel to abort)`;
-  
-  await ctx.reply(prompt);
-  await ctx.answerCallbackQuery();
 }
 
 /**
