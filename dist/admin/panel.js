@@ -1,11 +1,12 @@
 import { InlineKeyboard } from "grammy";
 import { BOT_MESSAGE_KEYS, BotConfigDocumentSchema, DEFAULT_BOT_CONFIG, getBotConfig, invalidateBotConfigCache, labelForLang, setBotConfigDocument, } from "../config/botContent.js";
-import { isPanelAdmin } from "../config/access.js";
+import { addPanelAdminId, isPanelAdmin, listDynamicPanelAdminIds, removePanelAdminId, } from "../config/access.js";
 import { resolveAdminLang } from "./lang.js";
-import { extractForwardedGroupId, forwardedGroupTitle, getStartNotifyGroupId, isStartNotifyEnabled, } from "../features/startNotify.js";
+import { getStartNotifyGroupRef, isStartNotifyEnabled, normalizePublicHandle, } from "../features/startNotify.js";
 import { logger } from "../logger.js";
 import { t, tf } from "../i18n/index.js";
-import { adjustDiamondBalance, countMatches, countOpenReports, banUser, unbanUser, deleteReferralFileReward, getAdminDashboardStats, adminGenderDistribution, adminOrientationDistribution, getUserByTelegramId, getUserById, getTelegramIdByUserId, listMessageLogs, listOpenReports, listReferralFileRewards, insertReferralFileReward, purgeAllMessageLogs, resolveReport, resetUserNopes, setProfileVisibility, setSession, getSystemSettingBool, setSystemSetting, } from "../db/repo.js";
+import { adjustDiamondBalance, countMatches, countOpenReports, banUser, unbanUser, deleteReferralFileReward, getAdminDashboardStats, adminGenderDistribution, adminOrientationDistribution, getProfile, getUserByTelegramId, getUserById, getTelegramIdByUserId, listMessageLogs, getMessageLogById, listOpenReports, listReferralFileRewards, insertReferralFileReward, purgeAllMessageLogs, resolveReport, resetUserNopes, setProfileVisibility, setSession, getSystemSettingBool, getSystemSettingJson, getSystemSettingNumber, setSystemSetting, upsertProfile, updateUserBadges, } from "../db/repo.js";
+import { handleButtonEditMessage } from "./buttonEditor.js";
 const REP_PAGE = 5;
 const MSG_LABEL_KEY = {
     welcome: "admin.msgWelcome",
@@ -23,10 +24,12 @@ const adm = {
     dismiss: (reporterId, targetId) => `adm:d:${reporterId}:${targetId}`,
     ban: (reporterId, targetId) => `adm:b:${reporterId}:${targetId}`,
     hide: (reporterId, targetId) => `adm:h:${reporterId}:${targetId}`,
+    reportEdit: (reporterId, targetId) => `adm:re:${reporterId}:${targetId}`,
     broadcast: "adm:bc",
     find: "adm:fn",
     logs: "adm:logs",
     logsPage: (page) => `adm:logs:${page}`,
+    logView: (id) => `adm:logv:${id}`,
     logToggle: "adm:logtog",
     logPurge: "adm:logpurge",
     logPurgeY: "adm:logpy",
@@ -43,14 +46,30 @@ const adm = {
     dimg: "adm:dimg",
     dimd: "adm:dimd",
     editMessages: "adm:msgedit",
+    buttonEditor: "btnedit:menu",
     msgPick: (key) => `adm:msp:${key}`,
     sendUser: "adm:su",
     rewardNew: "adm:rw",
     rewardList: "adm:rwl",
     rewardDelete: (id) => `adm:rwd:${id}`,
+    referralCfg: "adm:rwc",
+    referralSet: (key) => `adm:rws:${key}`,
+    admins: "adm:admins",
+    adminAdd: "adm:admins:add",
+    adminRemove: "adm:admins:remove",
+    botToggle: "adm:bot:toggle",
+    joins: "adm:joins",
+    joinAdd: "adm:joins:add",
+    joinClear: "adm:joins:clear",
+    userEditMenu: (targetId, reporterId = 0) => `adm:uem:${targetId}:${reporterId}`,
+    userEditField: (targetId, reporterId, field) => `adm:uef:${targetId}:${reporterId}:${field}`,
+    userVisibility: (targetId, visible, reporterId = 0) => `adm:uv:${targetId}:${visible}:${reporterId}`,
+    userBadgeVerified: (userId, enabled) => `adm:ubv:${userId}:${enabled}`,
+    userBadgeVip: (userId, enabled) => `adm:ubp:${userId}:${enabled}`,
     startNotify: "adm:sn",
     startNotifyToggle: "adm:snt",
     startNotifySet: "adm:sns",
+    page: (n) => `adm:pg:${n}`,
 };
 const CFG_SECTIONS = [
     "start",
@@ -61,6 +80,114 @@ const CFG_SECTIONS = [
     "stats",
 ];
 const LOG_PAGE = 12;
+const ADMIN_PROFILE_FIELDS = [
+    "display_name",
+    "age",
+    "city",
+    "country",
+    "bio",
+];
+function adminBoolLabel(lang, value) {
+    if (value)
+        return lang === "fa" ? "بله" : "Yes";
+    return lang === "fa" ? "خیر" : "No";
+}
+function reportReasonLabel(lang, reason) {
+    if (!reason.trim())
+        return "—";
+    if (reason === "user_reported")
+        return t(lang, "admin.reportReason.userReported");
+    return reason;
+}
+function trimPreview(value, limit = 90) {
+    const clean = value.trim();
+    if (!clean)
+        return "—";
+    return clean.length > limit ? `${clean.slice(0, limit - 1)}...` : clean;
+}
+function adminProfileEditPrompt(lang, field) {
+    return t(lang, `admin.profileEditPrompt.${field}`);
+}
+function adminProfileEditKeyboard(lang, targetUserId, reporterId, visible) {
+    const kb = new InlineKeyboard();
+    kb.text(t(lang, "admin.profileEditField.display_name"), adm.userEditField(targetUserId, reporterId, "display_name"))
+        .text(t(lang, "admin.profileEditField.age"), adm.userEditField(targetUserId, reporterId, "age"))
+        .row()
+        .text(t(lang, "admin.profileEditField.city"), adm.userEditField(targetUserId, reporterId, "city"))
+        .text(t(lang, "admin.profileEditField.country"), adm.userEditField(targetUserId, reporterId, "country"))
+        .row()
+        .text(t(lang, "admin.profileEditField.bio"), adm.userEditField(targetUserId, reporterId, "bio"))
+        .text(t(lang, visible ? "admin.profileVisibilityHide" : "admin.profileVisibilityShow"), adm.userVisibility(targetUserId, visible ? 0 : 1, reporterId))
+        .row();
+    if (reporterId > 0) {
+        kb.text(t(lang, "admin.ban"), adm.ban(reporterId, targetUserId))
+            .text(t(lang, "admin.ignore"), adm.dismiss(reporterId, targetUserId))
+            .row();
+    }
+    kb.text(t(lang, "admin.back"), adm.root);
+    return kb;
+}
+function adminReportActionsKeyboard(lang, reporterId, targetId) {
+    return new InlineKeyboard()
+        .text(t(lang, "admin.editProfile"), adm.reportEdit(reporterId, targetId))
+        .text(t(lang, "admin.ban"), adm.ban(reporterId, targetId))
+        .row()
+        .text(t(lang, "admin.ignore"), adm.dismiss(reporterId, targetId))
+        .text(t(lang, "admin.hide"), adm.hide(reporterId, targetId));
+}
+export function buildAdminReportActionsKeyboard(lang, reporterId, targetId) {
+    return adminReportActionsKeyboard(lang, reporterId, targetId);
+}
+export async function buildAdminUserCard(lang, targetUserId, reporterId = 0) {
+    const [target, profile] = await Promise.all([getUserById(targetUserId), getProfile(targetUserId)]);
+    if (!target)
+        return null;
+    const text = `${tf(lang, "admin.userLine", {
+        id: target.id,
+        tg: target.telegram_id,
+        username: target.username ?? "—",
+        banned: adminBoolLabel(lang, target.is_banned),
+        language: target.language === "fa" ? "فارسی" : "English",
+        diamonds: target.diamond_balance,
+        verified: adminBoolLabel(lang, target.badge_verified),
+        vip: adminBoolLabel(lang, target.badge_vip),
+        visible: adminBoolLabel(lang, profile?.visibility !== false),
+    })}\n\n${tf(lang, "admin.profileSummary", {
+        name: profile?.display_name ?? "—",
+        age: profile?.age ?? "—",
+        city: profile?.city ?? "—",
+        country: profile?.preferences.country ?? "—",
+        bio: trimPreview(profile?.bio ?? ""),
+    })}`;
+    const replyMarkup = new InlineKeyboard()
+        .text(t(lang, "admin.editProfile"), adm.userEditMenu(targetUserId, reporterId))
+        .row()
+        .text(t(lang, target.is_banned ? "admin.unban" : "admin.ban"), `adm:usrban:${target.id}:${target.is_banned ? 0 : 1}`)
+        .text(t(lang, profile?.visibility === false ? "admin.profileVisibilityShow" : "admin.profileVisibilityHide"), adm.userVisibility(targetUserId, profile?.visibility === false ? 1 : 0, reporterId))
+        .row()
+        .text(t(lang, "admin.resetNopes"), `adm:rnopes:${target.id}`)
+        .row()
+        .text(t(lang, target.badge_verified ? "admin.badgeVerifiedOff" : "admin.badgeVerifiedOn"), `adm:ubv:${target.id}:${target.badge_verified ? 0 : 1}`)
+        .text(t(lang, target.badge_vip ? "admin.badgeVipOff" : "admin.badgeVipOn"), `adm:ubp:${target.id}:${target.badge_vip ? 0 : 1}`);
+    if (reporterId > 0) {
+        replyMarkup.row().text(t(lang, "admin.ignore"), adm.dismiss(reporterId, targetUserId));
+    }
+    return { text, replyMarkup };
+}
+async function showAdminProfileEditMenu(ctx, lang, targetUserId, reporterId = 0) {
+    const profile = await getProfile(targetUserId);
+    if (!profile) {
+        await ctx.reply(t(lang, "admin.profileMissing"));
+        return;
+    }
+    await ctx.reply(`${t(lang, "admin.profileEditMenu")}\n\n${tf(lang, "admin.profileSummary", {
+        name: profile.display_name,
+        age: profile.age,
+        city: profile.city,
+        country: profile.preferences.country ?? "—",
+        bio: trimPreview(profile.bio),
+    })}`, { reply_markup: adminProfileEditKeyboard(lang, targetUserId, reporterId, profile.visibility) });
+}
 function adminValueLabel(lang, value) {
     const key = value.trim().toLowerCase();
     if (key === "yes")
@@ -105,8 +232,81 @@ function formatDistribution(lang, rows, labeler) {
         return "—";
     return rows.map((row) => `${labeler(lang, row.key)}: ${row.c}`).join("\n");
 }
-export function adminRootKb(lang) {
-    return new InlineKeyboard()
+const REFERRAL_SETTING_KEYS = [
+    "diamond_reward_profile",
+    "diamond_reward_referral",
+    "referral_vip_threshold",
+    "referral_badge_verify_threshold",
+];
+async function referralSettingsText(lang) {
+    const [profileReward, referralReward, vipThreshold, verifyThreshold] = await Promise.all([
+        getSystemSettingNumber("diamond_reward_profile", 10),
+        getSystemSettingNumber("diamond_reward_referral", 5),
+        getSystemSettingNumber("referral_vip_threshold", 10),
+        getSystemSettingNumber("referral_badge_verify_threshold", 10),
+    ]);
+    return tf(lang, "admin.referralConfigCurrent", {
+        profileReward,
+        referralReward,
+        vipThreshold,
+        verifyThreshold,
+    });
+}
+async function joinLocksText(lang) {
+    const raw = await getSystemSettingJson("must_join_channels", []);
+    const items = Array.isArray(raw) ? raw.map((v) => String(v)).filter(Boolean) : [];
+    return tf(lang, "admin.joinLocksCurrent", {
+        channels: items.length ? items.join("\n") : "—",
+    });
+}
+function navRow(kb, lang, page, total) {
+    const prev = lang === "fa" ? "‹ قبلی" : "‹ Prev";
+    const next = lang === "fa" ? "بعدی ›" : "Next ›";
+    const hasPrev = page > 1;
+    const hasNext = page < total;
+    if (hasPrev)
+        kb.text(prev, adm.page(page - 1));
+    if (hasNext)
+        kb.text(next, adm.page(page + 1));
+    return kb;
+}
+export function adminPageKb(lang, page) {
+    const TOTAL = 3;
+    if (page === 2) {
+        const kb = new InlineKeyboard()
+            .text(t(lang, "admin.botConfig"), adm.cfg)
+            .row()
+            .text(t(lang, "admin.editMessages"), adm.editMessages)
+            .row()
+            .text("✏️ " + (lang === "fa" ? "ویرایش دکمه‌ها" : "Edit Buttons"), adm.buttonEditor)
+            .row()
+            .text(t(lang, "admin.referralRewards"), adm.rewardNew)
+            .text(t(lang, "admin.rewardList"), adm.rewardList)
+            .row()
+            .text(t(lang, "admin.referralConfig"), adm.referralCfg)
+            .row()
+            .text(t(lang, "admin.admins"), adm.admins)
+            .text(t(lang, "admin.joinLocks"), adm.joins)
+            .row()
+            .text(t(lang, "admin.startNotify"), adm.startNotify)
+            .row();
+        return navRow(kb, lang, page, TOTAL);
+    }
+    if (page === 3) {
+        const kb = new InlineKeyboard()
+            .text(t(lang, "admin.logs"), adm.logs)
+            .text(t(lang, "admin.logToggle"), adm.logToggle)
+            .row()
+            .text(t(lang, "admin.ret24"), adm.ret(24))
+            .text(t(lang, "admin.ret72"), adm.ret(72))
+            .text(t(lang, "admin.ret168"), adm.ret(168))
+            .row()
+            .text(t(lang, "admin.logPurge"), adm.logPurge)
+            .row();
+        return navRow(kb, lang, page, TOTAL);
+    }
+    // Page 1 (default)
+    const kb = new InlineKeyboard()
         .text(t(lang, "admin.stats"), adm.stats)
         .row()
         .text(t(lang, "admin.reports"), adm.reports(0))
@@ -114,27 +314,15 @@ export function adminRootKb(lang) {
         .text(t(lang, "admin.broadcast"), adm.broadcast)
         .text(t(lang, "admin.find"), adm.find)
         .row()
-        .text(t(lang, "admin.logs"), adm.logs)
-        .text(t(lang, "admin.logToggle"), adm.logToggle)
-        .row()
-        .text(t(lang, "admin.ret24"), adm.ret(24))
-        .text(t(lang, "admin.ret72"), adm.ret(72))
-        .text(t(lang, "admin.ret168"), adm.ret(168))
-        .row()
-        .text(t(lang, "admin.logPurge"), adm.logPurge)
-        .row()
-        .text(t(lang, "admin.botConfig"), adm.cfg)
-        .row()
-        .text(t(lang, "admin.editMessages"), adm.editMessages)
-        .row()
+        .text(t(lang, "admin.sendUser"), adm.sendUser)
         .text(t(lang, "admin.diamonds"), adm.dim)
         .row()
-        .text(t(lang, "admin.sendUser"), adm.sendUser)
-        .text(t(lang, "admin.referralRewards"), adm.rewardNew)
-        .row()
-        .text(t(lang, "admin.rewardList"), adm.rewardList)
-        .row()
-        .text(t(lang, "admin.startNotify"), adm.startNotify);
+        .text(t(lang, "admin.botToggle"), adm.botToggle)
+        .row();
+    return navRow(kb, lang, page, TOTAL);
+}
+export function adminRootKb(lang) {
+    return adminPageKb(lang, 1);
 }
 export async function tryHandleAdminFollowupMessage(ctx, u, s, lang) {
     if (!isPanelAdmin(ctx.from?.id))
@@ -248,6 +436,76 @@ export async function tryHandleAdminFollowupMessage(ctx, u, s, lang) {
         }
         return true;
     }
+    if (s.state === "admin_profile_edit") {
+        const payload = s.payload;
+        if (txt === "/cancel") {
+            await setSession(u.id, { state: "idle", payload: {} });
+            await ctx.reply(t(lang, "admin.broadcastCancelled"));
+            return true;
+        }
+        const profile = await getProfile(payload.targetUserId);
+        if (!profile) {
+            await setSession(u.id, { state: "idle", payload: {} });
+            await ctx.reply(t(lang, "admin.profileMissing"));
+            return true;
+        }
+        const next = {
+            ...profile,
+            preferences: { ...profile.preferences },
+        };
+        if (payload.field === "display_name") {
+            const value = txt.slice(0, 32).trim();
+            if (!value) {
+                await ctx.reply(t(lang, "admin.profileEditInvalid.display_name"));
+                await ctx.reply(adminProfileEditPrompt(lang, payload.field));
+                return true;
+            }
+            next.display_name = value;
+        }
+        else if (payload.field === "age") {
+            const value = Number(txt.trim());
+            if (!Number.isInteger(value) || value < 18 || value > 99) {
+                await ctx.reply(t(lang, "admin.profileEditInvalid.age"));
+                await ctx.reply(adminProfileEditPrompt(lang, payload.field));
+                return true;
+            }
+            next.age = value;
+        }
+        else if (payload.field === "city") {
+            const value = txt.slice(0, 64).trim();
+            if (!value) {
+                await ctx.reply(t(lang, "admin.profileEditInvalid.city"));
+                await ctx.reply(adminProfileEditPrompt(lang, payload.field));
+                return true;
+            }
+            next.city = value;
+        }
+        else if (payload.field === "country") {
+            const value = txt.slice(0, 64).trim();
+            if (value === "-") {
+                delete next.preferences.country;
+                delete next.preferences.province_key;
+            }
+            else if (!value) {
+                await ctx.reply(t(lang, "admin.profileEditInvalid.country"));
+                await ctx.reply(adminProfileEditPrompt(lang, payload.field));
+                return true;
+            }
+            else {
+                next.preferences.country = value;
+                next.preferences.province_key = null;
+            }
+        }
+        else if (payload.field === "bio") {
+            next.bio = txt === "-" ? "" : txt.slice(0, 300).trim();
+        }
+        const { user_id: _ignored, ...rest } = next;
+        await upsertProfile(payload.targetUserId, rest);
+        await setSession(u.id, { state: "idle", payload: {} });
+        await ctx.reply(t(lang, "admin.profileEditSaved"));
+        await showAdminProfileEditMenu(ctx, lang, payload.targetUserId, payload.reporterId ?? 0);
+        return true;
+    }
     if (s.state === "admin_msg_edit") {
         const { key, step } = s.payload;
         if (txt === "/cancel") {
@@ -324,16 +582,20 @@ export async function tryHandleAdminFollowupMessage(ctx, u, s, lang) {
             await ctx.reply(t(lang, "admin.broadcastCancelled"));
             return true;
         }
-        const groupId = await extractForwardedGroupId(ctx);
-        if (groupId == null) {
+        // Accept either a @username handle or a numeric group ID (e.g. -1001234567890)
+        const numericId = Number(txt.trim());
+        const groupRef = Number.isFinite(numericId) && Number.isInteger(numericId) && numericId !== 0
+            ? String(numericId)
+            : normalizePublicHandle(txt);
+        if (!groupRef) {
             await ctx.reply(t(lang, "admin.startNotifySetPrompt"));
             return true;
         }
-        await setSystemSetting("start_notify_group_id", groupId);
+        await setSystemSetting("start_notify_group_ref", groupRef);
         await setSystemSetting("start_notify_enabled", true);
         await setSession(u.id, { state: "idle", payload: {} });
-        const title = forwardedGroupTitle(ctx);
-        await ctx.reply(tf(lang, "admin.startNotifySetDone", { title, id: groupId }));
+        await ctx.reply(tf(lang, "admin.startNotifySetDone", { title: groupRef, id: groupRef }));
+        await ctx.reply(t(lang, "admin.startNotifyBotAdminHint"));
         return true;
     }
     if (s.state === "admin_reward_meta") {
@@ -360,6 +622,66 @@ export async function tryHandleAdminFollowupMessage(ctx, u, s, lang) {
         });
         await ctx.reply(t(lang, "admin.rewardPromptFile"));
         return true;
+    }
+    if (s.state === "admin_referral_setting_wait") {
+        if (txt === "/cancel") {
+            await setSession(u.id, { state: "idle", payload: {} });
+            await ctx.reply(t(lang, "admin.broadcastCancelled"));
+            return true;
+        }
+        const key = s.payload.key;
+        const value = Number(txt);
+        if (!key || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+            await ctx.reply(t(lang, "admin.referralSettingPrompt"));
+            return true;
+        }
+        await setSystemSetting(key, value);
+        await setSession(u.id, { state: "idle", payload: {} });
+        await ctx.reply(t(lang, "admin.cfgSaved"));
+        return true;
+    }
+    if (s.state === "admin_join_lock_add") {
+        if (txt === "/cancel") {
+            await setSession(u.id, { state: "idle", payload: {} });
+            await ctx.reply(t(lang, "admin.broadcastCancelled"));
+            return true;
+        }
+        const handle = normalizePublicHandle(txt);
+        if (!handle) {
+            await ctx.reply(t(lang, "admin.joinLocksPrompt"));
+            return true;
+        }
+        const current = await getSystemSettingJson("must_join_channels", []);
+        const next = new Set(Array.isArray(current) ? current.map((v) => String(v)) : []);
+        next.add(handle);
+        await setSystemSetting("must_join_channels", Array.from(next));
+        await setSession(u.id, { state: "idle", payload: {} });
+        await ctx.reply(await joinLocksText(lang));
+        return true;
+    }
+    if (s.state === "admin_admin_add" || s.state === "admin_admin_remove") {
+        if (txt === "/cancel") {
+            await setSession(u.id, { state: "idle", payload: {} });
+            await ctx.reply(t(lang, "admin.broadcastCancelled"));
+            return true;
+        }
+        const tgId = Number(txt);
+        if (!Number.isFinite(tgId) || !Number.isInteger(tgId) || tgId <= 0) {
+            await ctx.reply(t(lang, "admin.findInvalid"));
+            return true;
+        }
+        if (s.state === "admin_admin_add")
+            await addPanelAdminId(tgId);
+        else
+            await removePanelAdminId(tgId);
+        await setSession(u.id, { state: "idle", payload: {} });
+        const ids = await listDynamicPanelAdminIds();
+        await ctx.reply(tf(lang, "admin.adminListBody", { ids: ids.length ? ids.join(", ") : "—" }));
+        return true;
+    }
+    // Handle button editor messages
+    if (s.state === "admin_button_edit") {
+        return await handleButtonEditMessage(ctx, u, s, lang);
     }
     return false;
 }
@@ -390,7 +712,15 @@ export function setupAdmin(bot) {
             return;
         const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         await ctx.answerCallbackQuery();
-        await ctx.editMessageText(t(lang, "admin.menu"), { reply_markup: adminRootKb(lang) });
+        await ctx.editMessageText(t(lang, "admin.menu"), { reply_markup: adminPageKb(lang, 1) });
+    });
+    bot.callbackQuery(/^adm:pg:(\d+)$/, async (ctx) => {
+        if (!isPanelAdmin(ctx.from?.id))
+            return;
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+        await ctx.answerCallbackQuery();
+        const page = Math.max(1, Math.min(3, Number(ctx.match[1])));
+        await ctx.editMessageText(t(lang, "admin.menu"), { reply_markup: adminPageKb(lang, page) });
     });
     bot.callbackQuery(adm.stats, async (ctx) => {
         if (!isPanelAdmin(ctx.from?.id))
@@ -440,10 +770,12 @@ export function setupAdmin(bot) {
             lines += `${tf(lang, "admin.reportRow", {
                 target: r.target_id,
                 reporter: r.reporter_id,
-                reason: r.reason || "—",
+                reason: reportReasonLabel(lang, r.reason),
             })}\n`;
-            kb.text(t(lang, "admin.dismiss"), adm.dismiss(r.reporter_id, r.target_id))
+            kb.text(t(lang, "admin.editProfile"), adm.reportEdit(r.reporter_id, r.target_id))
                 .text(t(lang, "admin.ban"), adm.ban(r.reporter_id, r.target_id))
+                .row()
+                .text(t(lang, "admin.ignore"), adm.dismiss(r.reporter_id, r.target_id))
                 .text(t(lang, "admin.hide"), adm.hide(r.reporter_id, r.target_id))
                 .row();
         }
@@ -470,7 +802,7 @@ export function setupAdmin(bot) {
             adminTelegramId: ctx.from.id,
         });
         logger.info({ reporterId, targetId, admin: ctx.from.id }, "admin_report_dismiss");
-        await ctx.reply(t(await resolveAdminLang(ctx.from?.id, ctx.from?.language_code), "admin.dismiss"));
+        await ctx.reply(t(await resolveAdminLang(ctx.from?.id, ctx.from?.language_code), "admin.ignore"));
     });
     bot.callbackQuery(/^adm:b:(\d+):(\d+)$/, async (ctx) => {
         if (!isPanelAdmin(ctx.from?.id))
@@ -486,6 +818,15 @@ export function setupAdmin(bot) {
         });
         logger.warn({ targetId, admin: ctx.from.id }, "admin_ban");
         await ctx.reply(t(await resolveAdminLang(ctx.from?.id, ctx.from?.language_code), "admin.ban"));
+    });
+    bot.callbackQuery(/^adm:re:(\d+):(\d+)$/, async (ctx) => {
+        if (!isPanelAdmin(ctx.from?.id))
+            return;
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+        const reporterId = Number(ctx.match?.[1]);
+        const targetId = Number(ctx.match?.[2]);
+        await ctx.answerCallbackQuery();
+        await showAdminProfileEditMenu(ctx, lang, targetId, reporterId);
     });
     bot.callbackQuery(/^adm:h:(\d+):(\d+)$/, async (ctx) => {
         if (!isPanelAdmin(ctx.from?.id))
@@ -532,11 +873,13 @@ export function setupAdmin(bot) {
         const rows = await listMessageLogs(LOG_PAGE, 0);
         const lines = rows.length
             ? rows
-                .map((r) => `${r.created_at.slice(0, 19)} [${r.direction}] tg:${r.telegram_user_id} ${r.update_type} ${r.text_preview.slice(0, 60)}`)
+                .map((r) => `#${r.id} ${r.created_at.slice(0, 19)} [${r.direction}] tg:${r.telegram_user_id} ${r.update_type} ${r.text_preview.slice(0, 45)}`)
                 .join("\n")
             : t(lang, "admin.logsEmpty");
         const nextRows = rows.length === LOG_PAGE ? await listMessageLogs(1, LOG_PAGE) : [];
         const kb = new InlineKeyboard();
+        for (const row of rows.slice(0, 6))
+            kb.text(`#${row.id}`, adm.logView(Number(row.id))).row();
         if (nextRows.length > 0)
             kb.text("»", adm.logsPage(1)).row();
         kb.text(t(lang, "admin.back"), adm.root);
@@ -553,11 +896,13 @@ export function setupAdmin(bot) {
         const rows = await listMessageLogs(LOG_PAGE, page * LOG_PAGE);
         const lines = rows.length
             ? rows
-                .map((r) => `${r.created_at.slice(0, 19)} [${r.direction}] tg:${r.telegram_user_id} ${r.update_type} ${r.text_preview.slice(0, 60)}`)
+                .map((r) => `#${r.id} ${r.created_at.slice(0, 19)} [${r.direction}] tg:${r.telegram_user_id} ${r.update_type} ${r.text_preview.slice(0, 45)}`)
                 .join("\n")
             : t(lang, "admin.logsEmpty");
         const nextRows = rows.length === LOG_PAGE ? await listMessageLogs(1, (page + 1) * LOG_PAGE) : [];
         const kb = new InlineKeyboard();
+        for (const row of rows.slice(0, 6))
+            kb.text(`#${row.id}`, adm.logView(Number(row.id))).row();
         if (page > 0)
             kb.text("«", adm.logsPage(page - 1));
         if (nextRows.length > 0)
@@ -568,6 +913,29 @@ export function setupAdmin(bot) {
         await ctx.editMessageText(lines.slice(0, 3500), {
             reply_markup: kb,
         });
+    });
+    bot.callbackQuery(/^adm:logv:(\d+)$/, async (ctx) => {
+        if (!isPanelAdmin(ctx.from?.id))
+            return;
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+        const id = Number(ctx.match?.[1] ?? 0);
+        await ctx.answerCallbackQuery();
+        const row = await getMessageLogById(id);
+        if (!row) {
+            await ctx.reply(t(lang, "admin.logsEmpty"));
+            return;
+        }
+        await ctx.reply(tf(lang, "admin.logDetail", {
+            id: row.id,
+            createdAt: row.created_at,
+            direction: row.direction,
+            telegramId: row.telegram_user_id,
+            chatId: row.chat_id,
+            messageId: row.message_id ?? "—",
+            updateType: row.update_type,
+            preview: row.text_preview || "—",
+            payload: JSON.stringify(row.payload ?? {}, null, 2).slice(0, 1200),
+        }), { reply_markup: new InlineKeyboard().text(t(lang, "admin.back"), adm.logs) });
     });
     bot.callbackQuery(adm.logToggle, async (ctx) => {
         if (!isPanelAdmin(ctx.from?.id))
@@ -747,6 +1115,50 @@ export function setupAdmin(bot) {
             await ctx.reply(t(lang, "admin.unban"));
         }
     });
+    bot.callbackQuery(/^adm:uem:(\d+):(\d+)$/, async (ctx) => {
+        if (!isPanelAdmin(ctx.from?.id))
+            return;
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+        const targetId = Number(ctx.match?.[1]);
+        const reporterId = Number(ctx.match?.[2] ?? 0);
+        await ctx.answerCallbackQuery();
+        await showAdminProfileEditMenu(ctx, lang, targetId, reporterId);
+    });
+    bot.callbackQuery(/^adm:uef:(\d+):(\d+):([a-z_]+)$/, async (ctx) => {
+        if (!isPanelAdmin(ctx.from?.id))
+            return;
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+        const targetId = Number(ctx.match?.[1]);
+        const reporterId = Number(ctx.match?.[2] ?? 0);
+        const field = String(ctx.match?.[3] ?? "");
+        if (!ADMIN_PROFILE_FIELDS.includes(field)) {
+            await ctx.answerCallbackQuery();
+            return;
+        }
+        const me = await getUserByTelegramId(ctx.from.id);
+        if (!me)
+            return;
+        await ctx.answerCallbackQuery();
+        await setSession(me.id, {
+            state: "admin_profile_edit",
+            payload: { targetUserId: targetId, reporterId: reporterId || undefined, field },
+        });
+        await ctx.reply(adminProfileEditPrompt(lang, field));
+    });
+    bot.callbackQuery(/^adm:uv:(\d+):(0|1):(\d+)$/, async (ctx) => {
+        if (!isPanelAdmin(ctx.from?.id))
+            return;
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+        const targetId = Number(ctx.match?.[1]);
+        const visible = ctx.match?.[2] === "1";
+        const reporterId = Number(ctx.match?.[3] ?? 0);
+        await setProfileVisibility(targetId, visible);
+        await ctx.answerCallbackQuery({
+            text: t(lang, visible ? "admin.profileVisibilityShown" : "admin.profileVisibilityHidden"),
+            show_alert: false,
+        });
+        await showAdminProfileEditMenu(ctx, lang, targetId, reporterId);
+    });
     bot.callbackQuery(adm.sendUser, async (ctx) => {
         if (!isPanelAdmin(ctx.from?.id))
             return;
@@ -801,13 +1213,124 @@ export function setupAdmin(bot) {
         await deleteReferralFileReward(id);
         await ctx.reply(tf(lang, "admin.rewardDeleted", { id }));
     });
+    bot.callbackQuery(adm.referralCfg, async (ctx) => {
+        if (!isPanelAdmin(ctx.from?.id))
+            return;
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+        await ctx.answerCallbackQuery();
+        await ctx.editMessageText(await referralSettingsText(lang), {
+            reply_markup: new InlineKeyboard()
+                .text(t(lang, "admin.referralProfileReward"), adm.referralSet("diamond_reward_profile"))
+                .text(t(lang, "admin.referralReferralReward"), adm.referralSet("diamond_reward_referral"))
+                .row()
+                .text(t(lang, "admin.referralVipThreshold"), adm.referralSet("referral_vip_threshold"))
+                .text(t(lang, "admin.referralVerifyThreshold"), adm.referralSet("referral_badge_verify_threshold"))
+                .row()
+                .text(t(lang, "admin.back"), adm.root),
+        });
+    });
+    bot.callbackQuery(/^adm:rws:(.+)$/, async (ctx) => {
+        if (!isPanelAdmin(ctx.from?.id))
+            return;
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+        const key = String(ctx.match?.[1] ?? "");
+        if (!REFERRAL_SETTING_KEYS.includes(key)) {
+            await ctx.answerCallbackQuery();
+            return;
+        }
+        await ctx.answerCallbackQuery();
+        const u = await getUserByTelegramId(ctx.from.id);
+        if (!u)
+            return;
+        await setSession(u.id, { state: "admin_referral_setting_wait", payload: { key } });
+        await ctx.reply(t(lang, "admin.referralSettingPrompt"));
+    });
+    bot.callbackQuery(adm.admins, async (ctx) => {
+        if (!isPanelAdmin(ctx.from?.id))
+            return;
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+        await ctx.answerCallbackQuery();
+        const ids = await listDynamicPanelAdminIds();
+        await ctx.editMessageText(tf(lang, "admin.adminListBody", { ids: ids.length ? ids.join(", ") : "—" }), {
+            reply_markup: new InlineKeyboard()
+                .text(t(lang, "admin.adminAdd"), adm.adminAdd)
+                .text(t(lang, "admin.adminRemove"), adm.adminRemove)
+                .row()
+                .text(t(lang, "admin.back"), adm.root),
+        });
+    });
+    bot.callbackQuery(adm.adminAdd, async (ctx) => {
+        if (!isPanelAdmin(ctx.from?.id))
+            return;
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+        await ctx.answerCallbackQuery();
+        const u = await getUserByTelegramId(ctx.from.id);
+        if (!u)
+            return;
+        await setSession(u.id, { state: "admin_admin_add", payload: {} });
+        await ctx.reply(t(lang, "admin.adminPrompt"));
+    });
+    bot.callbackQuery(adm.adminRemove, async (ctx) => {
+        if (!isPanelAdmin(ctx.from?.id))
+            return;
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+        await ctx.answerCallbackQuery();
+        const u = await getUserByTelegramId(ctx.from.id);
+        if (!u)
+            return;
+        await setSession(u.id, { state: "admin_admin_remove", payload: {} });
+        await ctx.reply(t(lang, "admin.adminPrompt"));
+    });
+    bot.callbackQuery(adm.botToggle, async (ctx) => {
+        if (!isPanelAdmin(ctx.from?.id))
+            return;
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+        const cur = await getSystemSettingBool("bot_enabled", true);
+        await setSystemSetting("bot_enabled", !cur);
+        await ctx.answerCallbackQuery({
+            text: !cur ? t(lang, "admin.botEnabled") : t(lang, "admin.botDisabled"),
+            show_alert: false,
+        });
+    });
+    bot.callbackQuery(adm.joins, async (ctx) => {
+        if (!isPanelAdmin(ctx.from?.id))
+            return;
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+        await ctx.answerCallbackQuery();
+        await ctx.editMessageText(await joinLocksText(lang), {
+            reply_markup: new InlineKeyboard()
+                .text(t(lang, "admin.joinLocksAdd"), adm.joinAdd)
+                .text(t(lang, "admin.joinLocksClear"), adm.joinClear)
+                .row()
+                .text(t(lang, "admin.back"), adm.root),
+        });
+    });
+    bot.callbackQuery(adm.joinAdd, async (ctx) => {
+        if (!isPanelAdmin(ctx.from?.id))
+            return;
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+        await ctx.answerCallbackQuery();
+        const u = await getUserByTelegramId(ctx.from.id);
+        if (!u)
+            return;
+        await setSession(u.id, { state: "admin_join_lock_add", payload: {} });
+        await ctx.reply(t(lang, "admin.joinLocksPrompt"));
+    });
+    bot.callbackQuery(adm.joinClear, async (ctx) => {
+        if (!isPanelAdmin(ctx.from?.id))
+            return;
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+        await ctx.answerCallbackQuery();
+        await setSystemSetting("must_join_channels", []);
+        await ctx.reply(await joinLocksText(lang));
+    });
     bot.callbackQuery(adm.startNotify, async (ctx) => {
         if (!isPanelAdmin(ctx.from?.id))
             return;
         const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
         await ctx.answerCallbackQuery();
         const enabled = await isStartNotifyEnabled();
-        const groupId = await getStartNotifyGroupId();
+        const groupId = await getStartNotifyGroupRef();
         const status = enabled ? t(lang, "admin.startNotifyEnabled") : t(lang, "admin.startNotifyDisabled");
         const group = groupId != null ? String(groupId) : "—";
         await ctx.editMessageText(tf(lang, "admin.startNotifyCurrent", { status, group }), {
@@ -822,12 +1345,13 @@ export function setupAdmin(bot) {
         if (!isPanelAdmin(ctx.from?.id))
             return;
         const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+        await ctx.answerCallbackQuery();
         const cur = await isStartNotifyEnabled();
         await setSystemSetting("start_notify_enabled", !cur);
         await ctx.answerCallbackQuery({
             text: !cur ? t(lang, "admin.startNotifyEnabled") : t(lang, "admin.startNotifyDisabled"),
-            show_alert: false,
-        });
+            show_alert: true,
+        }).catch(() => { });
     });
     bot.callbackQuery(adm.startNotifySet, async (ctx) => {
         if (!isPanelAdmin(ctx.from?.id))
@@ -839,5 +1363,29 @@ export function setupAdmin(bot) {
             return;
         await setSession(u.id, { state: "admin_start_notify_setup", payload: {} });
         await ctx.reply(t(lang, "admin.startNotifySetPrompt"));
+    });
+    bot.callbackQuery(/^adm:ubv:(\d+):(0|1)$/, async (ctx) => {
+        if (!isPanelAdmin(ctx.from?.id))
+            return;
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+        const userId = Number(ctx.match?.[1]);
+        const enabled = ctx.match?.[2] === "1";
+        await updateUserBadges({ userId, verified: enabled });
+        await ctx.answerCallbackQuery({
+            text: enabled ? t(lang, "admin.badgeVerifiedOn") : t(lang, "admin.badgeVerifiedOff"),
+            show_alert: false,
+        });
+    });
+    bot.callbackQuery(/^adm:ubp:(\d+):(0|1)$/, async (ctx) => {
+        if (!isPanelAdmin(ctx.from?.id))
+            return;
+        const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
+        const userId = Number(ctx.match?.[1]);
+        const enabled = ctx.match?.[2] === "1";
+        await updateUserBadges({ userId, vip: enabled });
+        await ctx.answerCallbackQuery({
+            text: enabled ? t(lang, "admin.badgeVipOn") : t(lang, "admin.badgeVipOff"),
+            show_alert: false,
+        });
     });
 }

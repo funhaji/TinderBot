@@ -1,8 +1,10 @@
-import { Bot, InlineKeyboard } from "grammy";
-import { setupAdmin, tryHandleAdminFollowupMessage } from "./admin/panel.js";
+import { Bot, InlineKeyboard, Keyboard } from "grammy";
+import { buildAdminReportActionsKeyboard, buildAdminUserCard, setupAdmin, tryHandleAdminFollowupMessage, } from "./admin/panel.js";
+import { setupButtonEditor } from "./admin/buttonEditor.js";
 import { ensureBotConfigSeeded, getBotConfig, getBotMsg, labelForLang } from "./config/botContent.js";
 import { config } from "./config.js";
-import { notifyStartGroup } from "./features/startNotify.js";
+import { isPanelAdmin, panelAdminTelegramIds, refreshPanelAdminCache } from "./config/access.js";
+import { normalizePublicHandle, notifyStartGroup } from "./features/startNotify.js";
 import { formatDiscoverCaption, explorerMarkup, registerExplorerCallbacks } from "./features/explorer.js";
 import { buildCodeHomeReplyKeyboard, matchCodeHomeAction } from "./config/homeMenu.js";
 import { IRAN_COUNTRY_EN, provinceLabel } from "./config/iranGeo.js";
@@ -14,7 +16,7 @@ import { defaultAvatarFile } from "./util/defaultAvatar.js";
 import { t, tf } from "./i18n/index.js";
 import { formatNowFooter } from "./util/dateFa.js";
 import { cb, langKeyboard, seekGenderKeyboard, settingsKeyboardFull, settingsLangPickKb, wizardGenderKeyboard, wizardOrientationKeyboard, wizardLookingForKeyboard, wizardSeekKeyboard, wizardAgeCategoryKeyboard, wizardAgePickKeyboard, wizardIranLocationKeyboard, } from "./ui/keyboards.js";
-import { addPermanentHide, adjustDiamondBalance, blockUser, countUsers, createReport, deleteUser, discoveryCandidates, ensureMatch, ensureSessionRow, extendedUserStats, getPrimaryPhoto, listPhotoFileIds, getProfile, getSession, getTelegramIdByUserId, findMysteryWaitUser, expireMysteryWaitSessions, expireMysteryVoteSessions, applyReferralMilestonesForReferrer, claimReferralFileReward, getUserByReferralCode, listUnclaimedReferralFileRewardsForUser, socialPairAllowed, getUserById, getUserByTelegramId, getUserInterestKeys, hasLiked, hasMatchBetween, insertMessageLog, insertProfileImpression, listInterests, listLikersNotMatched, listMatchesFor, listTelegramIdsForBroadcast, markReferralBonusPaid, mergeProfilePreferences, replacePhotos, resetSession, setLanguage, setProfileVisibility, setSession, setUserInterests, swipe, upsertProfile, upsertUser, getSystemSettingNumber, } from "./db/repo.js";
+import { addPermanentHide, adjustDiamondBalance, blockUser, countUsers, createReport, deleteUser, discoveryCandidates, ensureMatch, ensureSessionRow, extendedUserStats, getPrimaryPhoto, listPhotoFileIds, getProfile, getSession, getTelegramIdByUserId, findMysteryWaitUser, listInactiveMysteryChats, expireMysteryWaitSessions, expireMysteryVoteSessions, applyReferralMilestonesForReferrer, claimReferralFileReward, getUserByReferralCode, listUnclaimedReferralFileRewardsForUser, socialPairAllowed, getUserById, getUserByTelegramId, getUserInterestKeys, hasLiked, hasMatchBetween, insertMessageLog, insertProfileImpression, listInterests, listLikersNotMatched, listMatchesFor, listTelegramIdsForBroadcast, markReferralBonusPaid, mergeProfilePreferences, replacePhotos, resetSession, setLanguage, setProfileVisibility, setSession, setUserInterests, swipe, upsertProfile, upsertUser, getSystemSettingBool, getSystemSettingNumber, getSystemSettingJson, } from "./db/repo.js";
 // ── Hardcoded mystery-room strings (no i18n file edits needed) ──────────────
 const MR = {
     prefGender: { fa: "🧭 می‌خوای با کی حرف بزنی؟", en: "🧭 Who do you want to talk to?" },
@@ -33,6 +35,130 @@ function mr(lang, key) {
     return MR[key]?.[lang] ?? key;
 }
 // ────────────────────────────────────────────────────────────────────────────
+function chatKeyboard(lang, isMystery = false) {
+    const kb = new Keyboard();
+    if (isMystery) {
+        kb.text(t(lang, "chat.sendId"))
+            .text(t(lang, "chat.viewPartnerProfile"))
+            .row();
+    }
+    return kb.text(t(lang, "chat.endButton")).resized();
+}
+function chatEndKeyboard(lang) {
+    return chatKeyboard(lang, false);
+}
+function matchesChatButton(text, key) {
+    if (!text)
+        return false;
+    const trimmed = text.trim();
+    return trimmed === t("en", key) || trimmed === t("fa", key);
+}
+function isEndConversationText(text) {
+    return matchesChatButton(text, "chat.endButton");
+}
+function isChatBusyState(state) {
+    return state === "chat" || state === "chat_request" || state === "mystery_wait" || state === "mystery_vote";
+}
+function sameUserId(a, b) {
+    return Number(a) === Number(b);
+}
+async function clearPressedInlineKeyboard(ctx) {
+    await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => { });
+}
+async function notifyUserById(api, userId, message, reply_markup) {
+    const tgId = await getTelegramIdByUserId(userId);
+    if (!tgId)
+        return;
+    await api.sendMessage(tgId, message, reply_markup ? { reply_markup } : undefined).catch(() => { });
+}
+async function notifyUserByKey(api, userId, key, replyMarkup = "none") {
+    const user = await getUserById(userId);
+    const lang = user ? langFromDb(user.language) : "fa";
+    const markup = replyMarkup === "home"
+        ? buildCodeHomeReplyKeyboard(lang)
+        : replyMarkup === "chatEnd"
+            ? chatKeyboard(lang, false)
+            : undefined;
+    await notifyUserById(api, userId, t(lang, key), markup);
+}
+async function resetChatPartner(api, partnerId, userId, messageKey) {
+    const partnerSession = await getSession(partnerId);
+    if (partnerSession.state === "chat" && sameUserId(partnerSession.payload.withUserId, userId)) {
+        await resetSession(partnerId);
+        await notifyUserByKey(api, partnerId, messageKey, "home");
+    }
+}
+async function endCurrentChat(ctx, userId, session, lang) {
+    const partnerId = session.payload.withUserId;
+    await resetSession(userId);
+    await ctx.reply(t(lang, "chat.exit"), { reply_markup: buildCodeHomeReplyKeyboard(lang) });
+    await resetChatPartner(ctx.api, partnerId, userId, "mystery.partnerLeft");
+}
+async function touchMysteryChatActivity(userId, partnerId, current) {
+    if (!current.payload.isMystery)
+        return;
+    const now = Date.now();
+    const startedAt = current.payload.startedAt ?? now;
+    await setSession(userId, {
+        state: "chat",
+        payload: { ...current.payload, lastActivityAt: now },
+    });
+    const partnerSession = await getSession(partnerId);
+    if (partnerSession.state === "chat" && sameUserId(partnerSession.payload.withUserId, userId)) {
+        await setSession(partnerId, {
+            state: "chat",
+            payload: {
+                ...partnerSession.payload,
+                isMystery: true,
+                startedAt: partnerSession.payload.startedAt ?? startedAt,
+                lastActivityAt: now,
+            },
+        });
+    }
+}
+async function endInactiveMysteryChat(api, userId, partnerId) {
+    const session = await getSession(userId);
+    if (session.state !== "chat" || !session.payload.isMystery || !sameUserId(session.payload.withUserId, partnerId))
+        return;
+    await resetSession(userId);
+    await notifyUserByKey(api, userId, "mystery.inactiveEnded", "home");
+    await resetChatPartner(api, partnerId, userId, "mystery.inactiveEnded");
+}
+async function cancelLinkedChatRequest(api, userId, session) {
+    const otherId = session.payload.withUserId;
+    await resetSession(userId);
+    const otherSession = await getSession(otherId);
+    if (otherSession.state === "chat_request" && sameUserId(otherSession.payload.withUserId, userId)) {
+        await resetSession(otherId);
+        await notifyUserByKey(api, otherId, "chat.requestCancelled", "home");
+    }
+}
+async function startAcceptedChat(ctx, userId, otherId, lang) {
+    await setSession(userId, { state: "chat", payload: { withUserId: otherId } });
+    await setSession(otherId, { state: "chat", payload: { withUserId: userId } });
+    await ctx.reply(t(lang, "chat.start"), { reply_markup: chatKeyboard(lang, false) });
+    await notifyUserByKey(ctx.api, otherId, "chat.start", "chatEnd");
+}
+async function startMysteryChatPair(ctx, userId, partnerId, lang) {
+    const partnerUser = await getUserById(partnerId);
+    const partnerLang = partnerUser ? langFromDb(partnerUser.language) : "fa";
+    const partnerTgId = await getTelegramIdByUserId(partnerId);
+    const now = Date.now();
+    await setSession(userId, {
+        state: "chat",
+        payload: { withUserId: partnerId, isMystery: true, startedAt: now, lastActivityAt: now },
+    });
+    await setSession(partnerId, {
+        state: "chat",
+        payload: { withUserId: userId, isMystery: true, startedAt: now, lastActivityAt: now },
+    });
+    await ctx.reply(t(lang, "mystery.matched"), { reply_markup: chatKeyboard(lang, true) });
+    if (partnerTgId) {
+        await ctx.api
+            .sendMessage(partnerTgId, t(partnerLang, "mystery.matched"), { reply_markup: chatKeyboard(partnerLang, true) })
+            .catch(() => { });
+    }
+}
 function langFromDb(v) {
     return v === "fa" ? "fa" : "en";
 }
@@ -42,6 +168,71 @@ async function getLang(ctx) {
         return "en";
     const u = await getUserByTelegramId(tgId);
     return langFromDb(u?.language ?? "en");
+}
+async function notifyAdminsOfReport(ctx, params) {
+    const [reporter, target, targetProfile] = await Promise.all([
+        getUserById(params.reporterId),
+        getUserById(params.targetId),
+        getProfile(params.targetId),
+    ]);
+    if (!reporter || !target)
+        return;
+    for (const adminTelegramId of panelAdminTelegramIds()) {
+        const adminUser = await getUserByTelegramId(adminTelegramId);
+        const adminLang = langFromDb(adminUser?.language ?? "en");
+        await ctx.api
+            .sendMessage(adminTelegramId, tf(adminLang, "admin.reportInstant", {
+            targetId: target.id,
+            targetTg: target.telegram_id,
+            targetUsername: target.username ?? "—",
+            targetName: targetProfile?.display_name ?? "—",
+            targetCity: targetProfile?.city ?? "—",
+            reporterId: reporter.id,
+            reporterTg: reporter.telegram_id,
+            reporterUsername: reporter.username ?? "—",
+            reason: params.reason === "user_reported" ? t(adminLang, "admin.reportReason.userReported") : params.reason,
+        }), {
+            reply_markup: buildAdminReportActionsKeyboard(adminLang, params.reporterId, params.targetId),
+        })
+            .catch(() => { });
+    }
+}
+async function isBotEnabled() {
+    return getSystemSettingBool("bot_enabled", true);
+}
+function isTelegramMembershipStatusOk(status) {
+    return status === "member" || status === "administrator" || status === "creator";
+}
+async function getRequiredJoinHandles() {
+    const raw = await getSystemSettingJson("must_join_channels", []);
+    if (!Array.isArray(raw))
+        return [];
+    return raw
+        .map((v) => normalizePublicHandle(String(v ?? "")))
+        .filter((v) => !!v);
+}
+async function ensureJoinLocks(ctx, lang) {
+    if (!ctx.from || isPanelAdmin(ctx.from.id))
+        return true;
+    const handles = await getRequiredJoinHandles();
+    if (handles.length === 0)
+        return true;
+    const missing = [];
+    for (const handle of handles) {
+        try {
+            const member = await ctx.api.getChatMember(handle, ctx.from.id);
+            if (!isTelegramMembershipStatusOk(member.status))
+                missing.push(handle);
+        }
+        catch {
+            missing.push(handle);
+        }
+    }
+    if (missing.length === 0)
+        return true;
+    const key = lang === "fa" ? "join.required" : "join.required";
+    await ctx.reply(tf(lang, key, { channels: missing.join("\n") }));
+    return false;
 }
 function parseStartArgs(text) {
     const parts = (text ?? "").trim().split(/\s+/);
@@ -350,7 +541,7 @@ function lookingForLabel(lang, lf) {
         return lang === "fa" ? map[lf].fa : map[lf].en;
     return "—";
 }
-function formatMatchProfileCaption(lang, p) {
+function formatMatchProfileCaption(lang, p, telegramId) {
     const prfs = p.preferences ?? {};
     const country = prfs.country || "";
     const lines = [];
@@ -376,7 +567,33 @@ function formatMatchProfileCaption(lang, p) {
         if (prfs.personal_traits)
             lines.push(`\u2022 About: ${prfs.personal_traits}`);
     }
+    if (telegramId)
+        lines.push(`#ID:${telegramId}`);
     return lines.join("\n");
+}
+async function renderPartnerProfile(ctx, viewerId, partnerId, lang) {
+    const p = await getProfile(partnerId);
+    if (!p) {
+        await ctx.reply(t(lang, "errors.generic"));
+        return;
+    }
+    const viewer = await getProfile(viewerId);
+    const partnerUser = await getUserById(partnerId);
+    const partnerTgId = await getTelegramIdByUserId(partnerId);
+    const badgePrefix = formatProfileBadgesShort(lang, {
+        isOwner: partnerTgId === (config.ownerTelegramId || 7368901661),
+        isAdmin: partnerTgId != null && config.adminTelegramIdSet.has(partnerTgId),
+        verified: !!partnerUser?.badge_verified,
+        vip: !!partnerUser?.badge_vip,
+    });
+    const caption = formatDiscoverCaption({
+        lang,
+        target: p,
+        viewer: viewer ?? p,
+        badgePrefix: badgePrefix.trim() ? `${badgePrefix.trim()}\n` : undefined,
+    }) + (partnerTgId ? `\n#ID:${partnerTgId}` : "");
+    const photoId = await getPrimaryPhoto(partnerId);
+    await replyWithProfilePhoto(ctx, photoId, caption);
 }
 async function renderMyProfile(ctx, userId) {
     const lang = await getLang(ctx);
@@ -521,7 +738,7 @@ async function launchFeature(ctx, userId, feature) {
     if (feature === "mystery")
         await launchMysteryWelcome(ctx, userId);
     else
-        await discoverCore(ctx, userId);
+        await launchDiscoverFilters(ctx, userId);
 }
 async function launchMysteryWelcome(ctx, userId) {
     const lang = await getLang(ctx);
@@ -529,25 +746,405 @@ async function launchMysteryWelcome(ctx, userId) {
     const kb = new InlineKeyboard().text(t(lang, "mystery.welcome.start"), "mr:start");
     await ctx.reply(getBotMsg(cfg, "mystery_welcome", lang), { reply_markup: kb });
 }
-async function discoverCore(ctx, userId) {
+function defaultDiscoverFilters() {
+    return {
+        sameCity: false,
+        sameCountry: false,
+        verifiedOnly: false,
+        photoOnly: false,
+        age: "profile",
+        ageMin: null,
+        ageMax: null,
+        gender: "profile",
+        lookingFor: "compatible",
+        radius: "profile",
+        recentActivity: "any",
+        country: null,
+        includeCities: [],
+        excludeCountries: [],
+        excludeCities: [],
+        keyword: "",
+        interests: [],
+        screen: "main",
+    };
+}
+function quickDiscoverFilters() {
+    return {
+        sameCity: false,
+        sameCountry: false,
+        verifiedOnly: false,
+        photoOnly: false,
+        age: "any",
+        ageMin: null,
+        ageMax: null,
+        gender: "any",
+        lookingFor: "any",
+        radius: "any",
+        recentActivity: "any",
+        country: null,
+        includeCities: [],
+        excludeCountries: [],
+        excludeCities: [],
+        keyword: "",
+        interests: [],
+        screen: "main",
+    };
+}
+function discoverModeKeyboard(lang) {
+    return new InlineKeyboard()
+        .text(t(lang, "discover.mode.quick"), "dfm:quick")
+        .row()
+        .text(t(lang, "discover.mode.advanced"), "dfm:advanced")
+        .row()
+        .text(t(lang, "discover.filter.cancel"), "df:cancel");
+}
+function discoverRadiusMeters(profile, radius) {
+    if (radius === "profile")
+        return effectiveDiscoveryRadiusMeters(profile);
+    if (radius === "10")
+        return 10_000;
+    if (radius === "25")
+        return 25_000;
+    if (radius === "50")
+        return 50_000;
+    if (radius === "100")
+        return 100_000;
+    return config.DISCOVERY_RADIUS_METERS;
+}
+function trimFilterUiState(filters) {
+    const raw = filters.screen;
+    const screen = raw === "who" || raw === "where" || raw === "interests" ? raw : "main";
+    return { ...filters, screen };
+}
+function formatFilterValue(lang, value, emptyKey) {
+    return value && value.trim() ? value.trim() : t(lang, emptyKey);
+}
+function formatFilterList(lang, values, emptyKey) {
+    if (!values || values.length === 0)
+        return t(lang, emptyKey);
+    const preview = values.slice(0, 2).join(", ");
+    return values.length > 2 ? `${preview} +${values.length - 2}` : preview;
+}
+function hasFilterText(value) {
+    return Boolean(value?.trim());
+}
+function hasFilterList(values) {
+    return Boolean(values?.length);
+}
+function discoverActivityDays(filter) {
+    if (filter === "1")
+        return 1;
+    if (filter === "7")
+        return 7;
+    if (filter === "30")
+        return 30;
+    return null;
+}
+function discoverFilterPrompt(lang, field) {
+    if (field === "country")
+        return t(lang, "discover.filter.input.country");
+    if (field === "include_cities")
+        return t(lang, "discover.filter.input.includeCities");
+    if (field === "exclude_countries")
+        return t(lang, "discover.filter.input.excludeCountries");
+    if (field === "exclude_cities")
+        return t(lang, "discover.filter.input.excludeCities");
+    if (field === "keyword")
+        return t(lang, "discover.filter.input.keyword");
+    return t(lang, "discover.filter.input.ageRange");
+}
+function parseListInput(text) {
+    if (text.trim() === "-")
+        return [];
+    return Array.from(new Set(text
+        .split(/[\n,]+/)
+        .map((v) => v.trim())
+        .filter(Boolean)
+        .slice(0, 10)));
+}
+function parseAgeRangeInput(text) {
+    const m = text.trim().match(/^(\d{1,2})\s*[- ]\s*(\d{1,2})$/);
+    if (!m)
+        return null;
+    const min = Number(m[1]);
+    const max = Number(m[2]);
+    if (!Number.isInteger(min) || !Number.isInteger(max) || min < 18 || max > 99 || min > max)
+        return null;
+    return { min, max };
+}
+function discoverAgeLabel(lang, filters) {
+    const ageKey = filters.ageMin != null || filters.ageMax != null
+        ? null
+        : filters.age === "profile"
+            ? "discover.filter.age.profile"
+            : filters.age === "near"
+                ? "discover.filter.age.near"
+                : filters.age === "18_25"
+                    ? "discover.filter.age.18_25"
+                    : filters.age === "26_35"
+                        ? "discover.filter.age.26_35"
+                        : filters.age === "36_plus"
+                            ? "discover.filter.age.36_plus"
+                            : "discover.filter.age.any";
+    return ageKey
+        ? t(lang, ageKey)
+        : tf(lang, "discover.filter.age.custom", { min: filters.ageMin ?? 18, max: filters.ageMax ?? 99 });
+}
+function discoverGenderLabel(lang, filters) {
+    const key = filters.gender === "profile"
+        ? "discover.filter.gender.profile"
+        : filters.gender === "male"
+            ? "discover.filter.gender.male"
+            : filters.gender === "female"
+                ? "discover.filter.gender.female"
+                : filters.gender === "other"
+                    ? "discover.filter.gender.other"
+                    : "discover.filter.gender.any";
+    return t(lang, key);
+}
+function discoverLookingForLabel(lang, filters) {
+    const key = filters.lookingFor === "compatible"
+        ? "discover.filter.looking.compatible"
+        : filters.lookingFor === "friends"
+            ? "discover.filter.looking.friends"
+            : filters.lookingFor === "dating"
+                ? "discover.filter.looking.dating"
+                : "discover.filter.looking.any";
+    return t(lang, key);
+}
+function discoverRadiusLabel(lang, filters) {
+    const key = filters.radius === "profile"
+        ? "discover.filter.radius.profile"
+        : filters.radius === "10"
+            ? "discover.filter.radius.10"
+            : filters.radius === "25"
+                ? "discover.filter.radius.25"
+                : filters.radius === "50"
+                    ? "discover.filter.radius.50"
+                    : filters.radius === "100"
+                        ? "discover.filter.radius.100"
+                        : "discover.filter.radius.any";
+    return t(lang, key);
+}
+function discoverRecentLabel(lang, filters) {
+    const key = filters.recentActivity === "1"
+        ? "discover.filter.recent.1"
+        : filters.recentActivity === "7"
+            ? "discover.filter.recent.7"
+            : filters.recentActivity === "30"
+                ? "discover.filter.recent.30"
+                : "discover.filter.recent.any";
+    return t(lang, key);
+}
+function discoverSectionSummary(lang, filters, screen) {
+    if (screen === "who") {
+        const parts = [
+            discoverAgeLabel(lang, filters),
+            discoverGenderLabel(lang, filters),
+            discoverLookingForLabel(lang, filters),
+        ]
+            .map((s) => s.replace(/^.*?:\s*/, ""));
+        if (filters.verifiedOnly)
+            parts.push(t(lang, "discover.filter.verified").replace(/^.*?:\s*/, ""));
+        if (filters.photoOnly)
+            parts.push(t(lang, "discover.filter.photos").replace(/^.*?:\s*/, ""));
+        if (hasFilterText(filters.keyword))
+            parts.push(t(lang, "discover.filter.keyword"));
+        return parts.join(" • ");
+    }
+    if (screen === "where") {
+        const parts = [];
+        if (filters.sameCity)
+            parts.push(t(lang, "discover.filter.city"));
+        if (filters.sameCountry)
+            parts.push(t(lang, "discover.filter.country"));
+        if (hasFilterText(filters.country))
+            parts.push(formatFilterValue(lang, filters.country, "discover.filter.none"));
+        if (hasFilterList(filters.includeCities))
+            parts.push(`${t(lang, "discover.filter.cities.include")}: ${filters.includeCities.length}`);
+        if (hasFilterList(filters.excludeCities))
+            parts.push(`${t(lang, "discover.filter.cities.exclude")}: ${filters.excludeCities.length}`);
+        if (hasFilterList(filters.excludeCountries))
+            parts.push(`${t(lang, "discover.filter.countries.exclude")}: ${filters.excludeCountries.length}`);
+        parts.push(discoverRadiusLabel(lang, filters).replace(/^.*?:\s*/, ""));
+        return parts.join(" • ");
+    }
+    if (filters.interests?.length)
+        return tf(lang, "discover.filter.summary.selected", { n: filters.interests.length });
+    return t(lang, "discover.filter.none");
+}
+function discoverFilterKeyboard(lang, filters) {
+    const on = lang === "fa" ? "روشن" : "On";
+    const off = lang === "fa" ? "خاموش" : "Off";
+    const screen = filters.screen ?? "main";
+    if (screen === "main") {
+        return new InlineKeyboard()
+            .text(`${t(lang, "discover.filter.section.who")} · ${discoverSectionSummary(lang, filters, "who")}`, "df:screen:who")
+            .row()
+            .text(`${t(lang, "discover.filter.section.where")} · ${discoverSectionSummary(lang, filters, "where")}`, "df:screen:where")
+            .row()
+            .text(`${t(lang, "discover.filter.interests")} · ${discoverSectionSummary(lang, filters, "interests")}`, "df:screen:interests")
+            .row()
+            .text(t(lang, "discover.filter.start"), "df:start")
+            .row()
+            .text(t(lang, "discover.filter.reset"), "df:reset")
+            .text(t(lang, "discover.filter.cancel"), "df:cancel");
+    }
+    const kb = new InlineKeyboard();
+    if (screen === "who") {
+        kb.text(discoverAgeLabel(lang, filters), "df:age")
+            .text(t(lang, "discover.filter.age.edit"), "df:agecustom")
+            .row();
+        const genderOptions = ["profile", "male", "female", "other", "any"];
+        for (let i = 0; i < genderOptions.length; i++) {
+            const g = genderOptions[i];
+            const selected = filters.gender === g;
+            const label = (selected ? "✓ " : "") +
+                discoverGenderLabel(lang, { ...filters, gender: g }).replace(/^.*?:\s*/, "");
+            kb.text(label, `df:gender:${g}`);
+            if (i % 2 === 1 || i === genderOptions.length - 1)
+                kb.row();
+        }
+        kb.text(discoverLookingForLabel(lang, filters), "df:looking")
+            .row()
+            .text(`${filters.verifiedOnly ? on : off} · ${t(lang, "discover.filter.verified")}`, "df:verified")
+            .text(`${filters.photoOnly ? on : off} · ${t(lang, "discover.filter.photos")}`, "df:photos")
+            .row();
+        const hasKeyword = hasFilterText(filters.keyword);
+        kb.text(`${hasKeyword ? on : off} · ${t(lang, "discover.filter.keyword")}`, "df:keyword").row();
+        if (hasKeyword) {
+            kb.text(`${t(lang, "discover.filter.keyword")} · ${formatFilterValue(lang, filters.keyword, "discover.filter.none")}`, "df:keyword:edit").row();
+        }
+    }
+    else if (screen === "where") {
+        kb.text(`${filters.sameCity ? on : off} · ${t(lang, "discover.filter.city")}`, "df:city")
+            .row()
+            .text(`${filters.sameCountry ? on : off} · ${t(lang, "discover.filter.country")}`, "df:country")
+            .row()
+            .text(discoverRadiusLabel(lang, filters), "df:radius")
+            .row();
+        const hasCountry = hasFilterText(filters.country);
+        kb.text(`${hasCountry ? on : off} · ${t(lang, "discover.filter.country.pick")}`, "df:setcountry").row();
+        if (hasCountry) {
+            kb.text(`${t(lang, "discover.filter.country.pick")} · ${formatFilterValue(lang, filters.country, "discover.filter.none")}`, "df:setcountry:edit").row();
+        }
+        const hasIncludeCities = hasFilterList(filters.includeCities);
+        kb.text(`${hasIncludeCities ? on : off} · ${t(lang, "discover.filter.cities.include")}`, "df:addcity").row();
+        if (hasIncludeCities) {
+            kb.text(`${t(lang, "discover.filter.cities.include")} · ${formatFilterList(lang, filters.includeCities, "discover.filter.none")}`, "df:addcity:edit").row();
+        }
+        const hasExcludeCities = hasFilterList(filters.excludeCities);
+        kb.text(`${hasExcludeCities ? on : off} · ${t(lang, "discover.filter.cities.exclude")}`, "df:excity").row();
+        if (hasExcludeCities) {
+            kb.text(`${t(lang, "discover.filter.cities.exclude")} · ${formatFilterList(lang, filters.excludeCities, "discover.filter.none")}`, "df:excity:edit").row();
+        }
+        const hasExcludeCountries = hasFilterList(filters.excludeCountries);
+        kb.text(`${hasExcludeCountries ? on : off} · ${t(lang, "discover.filter.countries.exclude")}`, "df:excountry").row();
+        if (hasExcludeCountries) {
+            kb.text(`${t(lang, "discover.filter.countries.exclude")} · ${formatFilterList(lang, filters.excludeCountries, "discover.filter.none")}`, "df:excountry:edit").row();
+        }
+    }
+    kb.text(t(lang, "discover.filter.back"), "df:screen:main");
+    return kb;
+}
+async function discoverInterestKeyboard(lang, selected) {
+    const interests = await listInterests();
+    const kb = new InlineKeyboard();
+    for (const i of interests) {
+        const label = (selected.includes(i.key) ? "✅ " : "") + (lang === "fa" ? i.fa_label : i.en_label);
+        kb.text(label, `dfi:${i.key}`).row();
+    }
+    kb.text(t(lang, "discover.filter.interests.reset"), "dfi:reset")
+        .text(t(lang, "discover.filter.interests.done"), "dfi:done");
+    return kb;
+}
+async function editDiscoverFilterView(ctx, lang, filters) {
+    if (filters.screen === "interests") {
+        await ctx.editMessageText(t(lang, "discover.filter.interests.prompt"), {
+            reply_markup: await discoverInterestKeyboard(lang, filters.interests ?? []),
+        });
+        return;
+    }
+    const title = filters.screen === "who"
+        ? t(lang, "discover.filter.section.who")
+        : filters.screen === "where"
+            ? t(lang, "discover.filter.section.where")
+            : t(lang, "discover.filter.prompt");
+    await ctx.editMessageText(title, {
+        reply_markup: discoverFilterKeyboard(lang, filters),
+    });
+}
+async function replyDiscoverFilterView(ctx, lang, filters) {
+    if (filters.screen === "interests") {
+        await ctx.reply(t(lang, "discover.filter.interests.prompt"), {
+            reply_markup: await discoverInterestKeyboard(lang, filters.interests ?? []),
+        });
+        return;
+    }
+    const title = filters.screen === "who"
+        ? t(lang, "discover.filter.section.who")
+        : filters.screen === "where"
+            ? t(lang, "discover.filter.section.where")
+            : t(lang, "discover.filter.prompt");
+    await ctx.reply(title, {
+        reply_markup: discoverFilterKeyboard(lang, filters),
+    });
+}
+async function saveAndEditDiscoverFilters(ctx, userId, lang, filters) {
+    await setSession(userId, { state: "discover_filter", payload: filters });
+    await editDiscoverFilterView(ctx, lang, filters);
+}
+async function promptDiscoverFilterInput(ctx, userId, lang, filters, field) {
+    await setSession(userId, {
+        state: "discover_filter_input",
+        payload: { filters: trimFilterUiState(filters), field },
+    });
+    await ctx.answerCallbackQuery();
+    await ctx.reply(discoverFilterPrompt(lang, field));
+}
+async function launchDiscoverFilters(ctx, userId) {
+    const lang = await getLang(ctx);
+    await setSession(userId, { state: "discover_filter", payload: defaultDiscoverFilters() });
+    await ctx.reply(t(lang, "discover.mode.prompt"), { reply_markup: discoverModeKeyboard(lang) });
+}
+async function discoverCore(ctx, userId, filters = defaultDiscoverFilters()) {
     const lang = await getLang(ctx);
     await ctx.api.sendChatAction(ctx.chat.id, "typing").catch(() => { });
     const p = await getProfile(userId);
     if (!p)
         return;
-    const radius = effectiveDiscoveryRadiusMeters(p);
+    const radius = discoverRadiusMeters(p, filters.radius);
     const candidates = await discoveryCandidates({
         meId: userId,
         lat: p.location_lat,
         lon: p.location_lon,
         radiusMeters: radius,
         limit: config.DISCOVERY_BATCH_SIZE,
+        ageMin: filters.ageMin ?? null,
+        ageMax: filters.ageMax ?? null,
+        ageFilter: filters.age,
+        genderFilter: filters.gender,
+        sameCity: filters.sameCity,
+        country: filters.country ?? null,
+        includeCities: filters.includeCities ?? [],
+        excludeCountries: filters.excludeCountries ?? [],
+        excludeCities: filters.excludeCities ?? [],
+        sameCountry: filters.sameCountry,
+        verifiedOnly: filters.verifiedOnly,
+        photoOnly: filters.photoOnly,
+        keyword: filters.keyword?.trim() || null,
+        interestKeys: filters.interests ?? [],
+        recentActivityDays: discoverActivityDays(filters.recentActivity),
+        lookingForFilter: filters.lookingFor,
     });
     if (candidates.length === 0) {
-        await ctx.reply(t(lang, "discover.noCandidates"));
+        await setSession(userId, { state: "discover_filter", payload: filters });
+        await ctx.reply(`${t(lang, "discover.noCandidates")}\n\n${t(lang, "discover.filter.prompt")}`, {
+            reply_markup: discoverFilterKeyboard(lang, filters),
+        });
         return;
     }
-    await setSession(userId, { state: "discover", payload: { candidates, idx: 0, sub: "main" } });
+    await setSession(userId, { state: "discover", payload: { candidates, idx: 0, sub: "main", filters } });
     await renderDiscoverCard(ctx, userId);
 }
 async function startMysteryRoom(ctx, userId) {
@@ -555,6 +1152,10 @@ async function startMysteryRoom(ctx, userId) {
     const s = await getSession(userId);
     if (s.state === "chat") {
         await ctx.reply(t(lang, "mystery.alreadyInChat"));
+        return;
+    }
+    if (s.state === "chat_request") {
+        await ctx.reply(t(lang, "chat.requestPending"));
         return;
     }
     if (s.state === "mystery_wait") {
@@ -595,7 +1196,7 @@ async function discoverStart(ctx, userId) {
         await startFeatureSetupWizard(ctx, userId, "discover");
         return;
     }
-    await discoverCore(ctx, userId);
+    await launchDiscoverFilters(ctx, userId);
 }
 async function renderDiscoverCard(ctx, userId) {
     const lang = await getLang(ctx);
@@ -661,6 +1262,22 @@ async function renderDiscoverCard(ctx, userId) {
         });
     }
 }
+async function sendMatchNotifyMessage(api, chatId, lang, partnerId, header) {
+    const p = await getProfile(partnerId);
+    const partnerTg = await getTelegramIdByUserId(partnerId);
+    const kb = new InlineKeyboard().text(t(lang, "match.chatNow"), cb.matchChat(partnerId));
+    if (!p) {
+        await api.sendMessage(chatId, header, { reply_markup: kb }).catch(() => { });
+        return;
+    }
+    const body = formatMatchProfileCaption(lang, p, partnerTg);
+    const text = `${header}\n\n${body}`;
+    const photo = await getPrimaryPhoto(partnerId);
+    if (photo)
+        await api.sendPhoto(chatId, photo, { caption: text, reply_markup: kb }).catch(() => { });
+    else
+        await api.sendMessage(chatId, text, { reply_markup: kb }).catch(() => { });
+}
 async function notifyMatch(ctx, swiperId, targetId) {
     const cfg = await getBotConfig();
     const targetP = await getProfile(targetId);
@@ -672,13 +1289,11 @@ async function notifyMatch(ctx, swiperId, targetId) {
     if (targetP?.preferences.notify_match !== false) {
         const otherTg = await getTelegramIdByUserId(targetId);
         if (otherTg) {
-            const kb = new InlineKeyboard().text(t(targetLang, "match.chatNow"), cb.matchChat(swiperId));
-            await ctx.api.sendMessage(otherTg, getBotMsg(cfg, "match_notify", targetLang), { reply_markup: kb }).catch(() => { });
+            await sendMatchNotifyMessage(ctx.api, otherTg, targetLang, swiperId, getBotMsg(cfg, "match_notify", targetLang));
         }
     }
     if (swiperP?.preferences.notify_match !== false) {
-        const kb = new InlineKeyboard().text(t(swiperLang, "match.chatNow"), cb.matchChat(targetId));
-        await ctx.reply(getBotMsg(cfg, "match_notify", swiperLang), { reply_markup: kb });
+        await sendMatchNotifyMessage(ctx.api, ctx.chat.id, swiperLang, targetId, getBotMsg(cfg, "match_notify", swiperLang));
     }
 }
 async function canPostLike(swiperUserId, targetId) {
@@ -710,9 +1325,25 @@ async function handleSwipe(ctx, direction) {
                 const myP = await getProfile(u.id);
                 const targetUser = await getUserById(targetId);
                 const tl = langFromDb(targetUser?.language ?? "en");
-                await ctx.api
-                    .sendMessage(likeTg, `${myP?.display_name ?? (tl === "fa" ? "یک نفر" : "Someone")} ❤️`)
-                    .catch(() => { });
+                if (!myP) {
+                    await ctx.api
+                        .sendMessage(likeTg, `${(tl === "fa" ? "یک نفر" : "Someone")} ❤️`)
+                        .catch(() => { });
+                }
+                else {
+                    // Improved notification with city, country, gender
+                    const genderLabel = myP.gender
+                        ? t(tl, `profile.gender.${myP.gender}`)
+                        : (tl === "fa" ? "یک نفر" : "Someone");
+                    const city = myP.city || (tl === "fa" ? "شهر نامشخص" : "Unknown city");
+                    const country = myP.preferences?.country || (tl === "fa" ? "کشور نامشخص" : "Unknown country");
+                    const message = tf(tl, "like.notification", {
+                        gender: genderLabel,
+                        city,
+                        country,
+                    });
+                    await ctx.api.sendMessage(likeTg, message).catch(() => { });
+                }
             }
         }
         const mutual = await hasLiked(targetId, u.id);
@@ -770,21 +1401,72 @@ async function showStats(ctx, userId) {
         .text(labelForLang(cfg.stats.view_profile, lang), cb.profile);
     await ctx.reply(lines.join("\n"), { reply_markup: kb });
 }
-async function showLikers(ctx, userId) {
+const LIKERS_PER_PAGE = 10;
+const LIKERS_MAX_LIST = 100;
+function likersPageBounds(idsLength, page) {
+    const totalPages = Math.max(1, Math.ceil(idsLength / LIKERS_PER_PAGE));
+    const safePage = Math.max(0, Math.min(page, totalPages - 1));
+    const start = safePage * LIKERS_PER_PAGE;
+    return { totalPages, safePage, start, end: start + LIKERS_PER_PAGE };
+}
+function likersListText(lang, ids, page, truncated) {
+    const { totalPages, safePage } = likersPageBounds(ids.length, page);
+    const lines = [t(lang, "likers.title")];
+    if (totalPages > 1) {
+        lines.push(tf(lang, "likers.pageInfo", { page: safePage + 1, total: totalPages, count: ids.length }));
+    }
+    if (truncated)
+        lines.push(tf(lang, "likers.truncated", { shown: LIKERS_MAX_LIST }));
+    return lines.join("\n");
+}
+async function buildLikersKeyboard(lang, ids, page) {
+    const { totalPages, safePage, start, end } = likersPageBounds(ids.length, page);
+    const kb = new InlineKeyboard();
+    for (const id of ids.slice(start, end)) {
+        const p = await getProfile(id);
+        const tgId = await getTelegramIdByUserId(id);
+        const idSuffix = tgId ? ` · #${tgId}` : "";
+        const label = p ? `${p.display_name} (${p.age})${idSuffix}` : `User ${id}${idSuffix}`;
+        const shortLabel = label.length > 60 ? `${label.slice(0, 57)}…` : label;
+        kb.text(shortLabel, cb.likerLikeBack(id)).row();
+    }
+    if (totalPages > 1) {
+        const hasPrev = safePage > 0;
+        const hasNext = safePage < totalPages - 1;
+        if (hasPrev)
+            kb.text(t(lang, "likers.prev"), cb.likersPage(safePage - 1));
+        if (hasNext)
+            kb.text(t(lang, "likers.next"), cb.likersPage(safePage + 1));
+        if (hasPrev || hasNext)
+            kb.row();
+    }
+    return kb;
+}
+async function showLikers(ctx, userId, page = 0, opts) {
     const lang = await getLang(ctx);
-    await ctx.api.sendChatAction(ctx.chat.id, "typing").catch(() => { });
+    if (!opts?.edit)
+        await ctx.api.sendChatAction(ctx.chat.id, "typing").catch(() => { });
     const ids = await listLikersNotMatched(userId);
     if (ids.length === 0) {
-        await ctx.reply(t(lang, "likers.none"));
+        if (opts?.edit) {
+            await ctx.editMessageText(t(lang, "likers.none"), { reply_markup: undefined }).catch(() => { });
+        }
+        else {
+            await ctx.reply(t(lang, "likers.none"));
+        }
         return;
     }
-    const kb = new InlineKeyboard();
-    for (const id of ids.slice(0, 15)) {
-        const p = await getProfile(id);
-        const label = p ? `${p.display_name} (${p.age})` : `User ${id}`;
-        kb.text(label, cb.likerLikeBack(id)).row();
+    const truncated = ids.length >= LIKERS_MAX_LIST;
+    const text = likersListText(lang, ids, page, truncated);
+    const reply_markup = await buildLikersKeyboard(lang, ids, page);
+    if (opts?.edit) {
+        await ctx.editMessageText(text, { reply_markup }).catch(async () => {
+            await ctx.reply(text, { reply_markup });
+        });
     }
-    await ctx.reply(t(lang, "likers.title"), { reply_markup: kb });
+    else {
+        await ctx.reply(text, { reply_markup });
+    }
 }
 async function setupUx(bot) {
     await bot.api.setMyCommands([
@@ -833,7 +1515,32 @@ async function deliverReferralRewardsForReferrer(ctx, referrerUserId) {
 }
 export async function createBot() {
     await ensureBotConfigSeeded();
+    await refreshPanelAdminCache();
     const bot = new Bot(config.BOT_TOKEN);
+    // ── Per-user sequential update processing ─────────────────────────────────
+    // grammY's bot.start() processes updates in a polling batch concurrently
+    // (no await per update). This causes a session race condition when a user
+    // quickly sends two interactions (e.g. pressing an inline button and /start)
+    // in the same batch: the callback's setSession(discover) can fire AFTER
+    // /start's resetSession(idle), leaving the session permanently stuck in
+    // discover state and making the bot appear frozen.
+    const _userQueues = new Map();
+    bot.use(async (ctx, next) => {
+        const userId = ctx.from?.id;
+        if (!userId)
+            return next();
+        const prev = _userQueues.get(userId) ?? Promise.resolve();
+        const current = prev.catch(() => { }).then(() => next());
+        _userQueues.set(userId, current);
+        try {
+            await current;
+        }
+        finally {
+            if (_userQueues.get(userId) === current) {
+                _userQueues.delete(userId);
+            }
+        }
+    });
     bot.api.config.use(async (prev, method, payload, signal) => {
         try {
             return await prev(method, payload, signal);
@@ -859,10 +1566,33 @@ export async function createBot() {
         const tg = ctx.from?.id;
         if (!tg)
             return next();
+        if (!(await isBotEnabled()) && !isPanelAdmin(tg)) {
+            const lang = ctx.from?.language_code?.startsWith("fa") ? "fa" : "en";
+            await ctx.reply(t(lang, "bot.disabled"));
+            return;
+        }
         const u = await getUserByTelegramId(tg);
         if (u?.is_banned) {
             const lang = ctx.from?.language_code?.startsWith("fa") ? "fa" : "en";
             await ctx.reply(t(lang, "settings.banned"));
+            return;
+        }
+        return next();
+    });
+    bot.use(async (ctx, next) => {
+        if (ctx.chat?.type !== "private" || !ctx.from)
+            return next();
+        if (isPanelAdmin(ctx.from.id))
+            return next();
+        const text = ctx.message?.text?.trim();
+        if (text?.startsWith("/start"))
+            return next();
+        const u = await getUserByTelegramId(ctx.from.id);
+        const lang = langFromDb(u?.language ?? (ctx.from.language_code?.startsWith("fa") ? "fa" : "en"));
+        const ok = await ensureJoinLocks(ctx, lang);
+        if (!ok) {
+            if (ctx.callbackQuery)
+                await ctx.answerCallbackQuery().catch(() => { });
             return;
         }
         return next();
@@ -893,7 +1623,7 @@ export async function createBot() {
         return next();
     });
     bot.use(async (ctx, next) => {
-        if (!ctx.from || !config.adminTelegramIdSet.has(ctx.from.id))
+        if (!ctx.from || !isPanelAdmin(ctx.from.id))
             return next();
         if (!ctx.message)
             return next();
@@ -960,22 +1690,12 @@ export async function createBot() {
                 await ctx.reply(t(lang, "admin.userNotFound"));
                 return;
             }
-            const targetProfile = await getProfile(target.id);
-            const userKb = new InlineKeyboard()
-                .text(t(lang, "admin.resetNopes"), `adm:rnopes:${target.id}`)
-                .row()
-                .text(t(lang, target.is_banned ? "admin.unban" : "admin.ban"), `adm:usrban:${target.id}:${target.is_banned ? 0 : 1}`);
-            await ctx.reply(tf(lang, "admin.userLine", {
-                id: target.id,
-                tg: target.telegram_id,
-                username: target.username ?? "—",
-                banned: target.is_banned ? (lang === "fa" ? "بله" : "Yes") : lang === "fa" ? "خیر" : "No",
-                language: target.language === "fa" ? "فارسی" : "English",
-                diamonds: target.diamond_balance,
-                verified: target.badge_verified ? (lang === "fa" ? "بله" : "Yes") : lang === "fa" ? "خیر" : "No",
-                vip: target.badge_vip ? (lang === "fa" ? "بله" : "Yes") : lang === "fa" ? "خیر" : "No",
-                visible: targetProfile?.visibility === false ? (lang === "fa" ? "خیر" : "No") : lang === "fa" ? "بله" : "Yes",
-            }), { reply_markup: userKb });
+            const card = await buildAdminUserCard(lang, target.id);
+            if (!card) {
+                await ctx.reply(t(lang, "admin.userNotFound"));
+                return;
+            }
+            await ctx.reply(card.text, { reply_markup: card.replyMarkup });
             return;
         }
         if (await tryHandleAdminFollowupMessage(ctx, u, s, lang))
@@ -993,10 +1713,16 @@ export async function createBot() {
             s.state === "admin_find" ||
             s.state === "admin_config_wait" ||
             s.state === "admin_diamond_wait" ||
+            s.state === "admin_profile_edit" ||
             s.state === "admin_msg_edit" ||
             s.state === "admin_send_user" ||
+            s.state === "admin_referral_setting_wait" ||
+            s.state === "admin_join_lock_add" ||
+            s.state === "admin_admin_add" ||
+            s.state === "admin_admin_remove" ||
             s.state === "admin_reward_meta" ||
-            s.state === "admin_reward_file")
+            s.state === "admin_reward_file" ||
+            s.state === "admin_start_notify_setup")
             return next();
         if (s.state === "mystery_wait") {
             if (!ctx.message.text?.startsWith("/")) {
@@ -1016,9 +1742,70 @@ export async function createBot() {
             }
             return next();
         }
+        if (s.state === "chat_request") {
+            if (!ctx.message.text?.startsWith("/")) {
+                const reqLang = await getLang(ctx);
+                await ctx.reply(t(reqLang, "chat.requestPending"));
+            }
+            return next();
+        }
+        if (s.state === "discover_filter") {
+            if (!ctx.message.text?.startsWith("/")) {
+                const dfLang = await getLang(ctx);
+                await replyDiscoverFilterView(ctx, dfLang, s.payload);
+            }
+            return next();
+        }
+        if (s.state === "discover_filter_input") {
+            if (!ctx.message.text?.startsWith("/")) {
+                const dfLang = await getLang(ctx);
+                await ctx.reply(discoverFilterPrompt(dfLang, s.payload.field));
+            }
+            return next();
+        }
         if (s.state !== "chat")
             return next();
+        const txt = ctx.message.text;
+        const chatLang = await getLang(ctx);
+        if (isEndConversationText(txt)) {
+            await endCurrentChat(ctx, u.id, s, chatLang);
+            return;
+        }
+        if (s.payload.isMystery) {
+            if (matchesChatButton(txt, "chat.sendId")) {
+                const myUsername = ctx.from?.username;
+                const myTg = ctx.from?.id;
+                const partnerId = s.payload.withUserId;
+                const partnerTg = await getTelegramIdByUserId(partnerId);
+                const partnerUser = await getUserById(partnerId);
+                const partnerLang = partnerUser ? langFromDb(partnerUser.language) : chatLang;
+                if (!myUsername) {
+                    // User has no username
+                    await ctx.reply(t(chatLang, "chat.noUsername"));
+                    return;
+                }
+                const usernameFormatted = `@${myUsername}`;
+                await ctx.reply(tf(chatLang, "chat.idSentUsername", { username: usernameFormatted }));
+                if (partnerTg) {
+                    await ctx.api
+                        .sendMessage(partnerTg, tf(partnerLang, "chat.idReceivedUsername", { username: usernameFormatted }))
+                        .catch(() => { });
+                }
+                return;
+            }
+            if (matchesChatButton(txt, "chat.viewPartnerProfile")) {
+                await renderPartnerProfile(ctx, u.id, s.payload.withUserId, chatLang);
+                return;
+            }
+        }
         if (s.payload.isMystery && s.payload.startedAt) {
+            const lastActivityAt = s.payload.lastActivityAt ?? s.payload.startedAt;
+            if (Date.now() - lastActivityAt > 3 * 60 * 1000) {
+                await resetSession(u.id);
+                await ctx.reply(t(chatLang, "mystery.inactiveEnded"), { reply_markup: buildCodeHomeReplyKeyboard(chatLang) });
+                await resetChatPartner(ctx.api, s.payload.withUserId, u.id, "mystery.inactiveEnded");
+                return;
+            }
             const elapsed = Date.now() - s.payload.startedAt;
             if (elapsed > 15 * 60 * 1000) {
                 const myLang = langFromDb(u.language);
@@ -1026,9 +1813,11 @@ export async function createBot() {
                 const partnerUser15 = await getUserById(partnerId15);
                 const partnerLang15 = partnerUser15 ? langFromDb(partnerUser15.language) : "fa";
                 const partnerTg15 = await getTelegramIdByUserId(partnerId15);
-                await ctx.reply(t(myLang, "mystery.timedOut"));
+                await ctx.reply(t(myLang, "mystery.timedOut"), { reply_markup: { remove_keyboard: true } });
                 if (partnerTg15) {
-                    await ctx.api.sendMessage(partnerTg15, t(partnerLang15, "mystery.timedOut")).catch(() => { });
+                    await ctx.api
+                        .sendMessage(partnerTg15, t(partnerLang15, "mystery.timedOut"), { reply_markup: { remove_keyboard: true } })
+                        .catch(() => { });
                 }
                 const nowVote = Date.now();
                 await setSession(u.id, { state: "mystery_vote", payload: { partnerId: partnerId15, enteredAt: nowVote } });
@@ -1046,13 +1835,19 @@ export async function createBot() {
                 return next();
             }
         }
-        const txt = ctx.message.text;
         if (txt?.startsWith("/"))
             return next();
+        const partnerSession = await getSession(s.payload.withUserId);
+        if (partnerSession.state !== "chat" || !sameUserId(partnerSession.payload.withUserId, u.id)) {
+            await resetSession(u.id);
+            await ctx.reply(t(chatLang, "mystery.partnerLeft"), { reply_markup: buildCodeHomeReplyKeyboard(chatLang) });
+            return;
+        }
         const otherTg = await getTelegramIdByUserId(s.payload.withUserId);
         if (otherTg) {
             try {
                 await ctx.api.copyMessage(otherTg, ctx.chat.id, ctx.message.message_id);
+                await touchMysteryChatActivity(u.id, s.payload.withUserId, s);
             }
             catch {
                 const lang = await getLang(ctx);
@@ -1067,8 +1862,28 @@ export async function createBot() {
         const u = await ensureDbUser(ctx, refDb);
         if (!u)
             return;
+        // ── Graceful teardown of whatever the user was doing ──────────────────────
+        // Read the session first so we can notify partners / clean up properly,
+        // then reset unconditionally so the user always lands in idle state.
+        const prevSession = await getSession(u.id);
+        if (prevSession.state === "chat") {
+            const partnerId = prevSession.payload.withUserId;
+            await resetChatPartner(ctx.api, partnerId, u.id, "mystery.partnerLeft");
+        }
+        if (prevSession.state === "chat_request") {
+            await cancelLinkedChatRequest(ctx.api, u.id, prevSession);
+        }
+        if (prevSession.state === "mystery_vote") {
+            const partnerId = prevSession.payload.partnerId;
+            await resetSession(partnerId);
+            await notifyUserByKey(ctx.api, partnerId, "mystery.partnerLeft", "home");
+        }
+        // Reset this user's session unconditionally — /start always clears everything.
+        await resetSession(u.id);
         const isNewUser = !existedBefore;
         let lang = langFromDb(u.language);
+        if (!(await ensureJoinLocks(ctx, lang)))
+            return;
         if (isNewUser && ctx.from) {
             const total = await countUsers();
             await notifyStartGroup(ctx.api, {
@@ -1085,8 +1900,40 @@ export async function createBot() {
         if (args.matchOther != null) {
             const ok = await hasMatchBetween(u.id, args.matchOther);
             if (ok) {
-                await setSession(u.id, { state: "chat", payload: { withUserId: args.matchOther } });
-                await ctx.reply(t(lang, "chat.start"));
+                const otherSession = await getSession(args.matchOther);
+                const otherTgId = await getTelegramIdByUserId(args.matchOther);
+                if (isChatBusyState(otherSession.state) || !otherTgId) {
+                    await ctx.reply(t(lang, "chat.userBusy"));
+                    return;
+                }
+                const otherUser = await getUserById(args.matchOther);
+                const otherLang = otherUser ? langFromDb(otherUser.language) : "fa";
+                const myProfile = await getProfile(u.id);
+                const requesterName = myProfile?.display_name ?? (otherLang === "fa" ? "یک نفر" : "Someone");
+                const now = Date.now();
+                await setSession(u.id, {
+                    state: "chat_request",
+                    payload: { withUserId: args.matchOther, direction: "outgoing", createdAt: now },
+                });
+                await setSession(args.matchOther, {
+                    state: "chat_request",
+                    payload: { withUserId: u.id, direction: "incoming", createdAt: now },
+                });
+                const kb = new InlineKeyboard()
+                    .text(t(otherLang, "chat.requestAccept"), `mchat:accept:${u.id}`)
+                    .text(t(otherLang, "chat.requestDecline"), `mchat:decline:${u.id}`);
+                try {
+                    await ctx.api.sendMessage(otherTgId, tf(otherLang, "chat.requestIncoming", { name: requesterName }), { reply_markup: kb });
+                }
+                catch {
+                    await cancelLinkedChatRequest(ctx.api, u.id, {
+                        state: "chat_request",
+                        payload: { withUserId: args.matchOther, direction: "outgoing", createdAt: now },
+                    });
+                    await ctx.reply(t(lang, "errors.generic"));
+                    return;
+                }
+                await ctx.reply(t(lang, "chat.requestSent"));
                 return;
             }
             await ctx.reply(t(lang, "matches.invalid"));
@@ -1105,17 +1952,26 @@ export async function createBot() {
         const u = await ensureDbUser(ctx);
         if (!u)
             return;
+        const lang = langFromDb(u.language);
+        if (!(await ensureJoinLocks(ctx, lang)))
+            return;
         await renderMyProfile(ctx, u.id);
     });
     bot.command("discover", async (ctx) => {
         const u = await ensureDbUser(ctx);
         if (!u)
             return;
+        const lang = langFromDb(u.language);
+        if (!(await ensureJoinLocks(ctx, lang)))
+            return;
         await discoverStart(ctx, u.id);
     });
     bot.command("matches", async (ctx) => {
         const u = await ensureDbUser(ctx);
         if (!u)
+            return;
+        const lang = langFromDb(u.language);
+        if (!(await ensureJoinLocks(ctx, lang)))
             return;
         await showMatches(ctx, u.id);
     });
@@ -1130,16 +1986,13 @@ export async function createBot() {
             await ctx.reply(t(lang, "mystery.cancelled"));
             return;
         }
+        if (s.state === "chat_request") {
+            await cancelLinkedChatRequest(ctx.api, u.id, s);
+            await ctx.reply(t(lang, "chat.requestDeclined"), { reply_markup: buildCodeHomeReplyKeyboard(lang) });
+            return;
+        }
         if (s.state === "chat") {
-            const partnerId = s.payload.withUserId;
-            await resetSession(u.id);
-            await ctx.reply(t(lang, "chat.exit"));
-            const partnerTgIdEx = await getTelegramIdByUserId(partnerId);
-            if (partnerTgIdEx) {
-                const partnerUserEx = await getUserById(partnerId);
-                const pLang = partnerUserEx ? langFromDb(partnerUserEx.language) : "fa";
-                await ctx.api.sendMessage(partnerTgIdEx, t(pLang, "mystery.partnerLeft")).catch(() => { });
-            }
+            await endCurrentChat(ctx, u.id, s, lang);
         }
     });
     bot.command("block", async (ctx) => {
@@ -1152,7 +2005,8 @@ export async function createBot() {
             return;
         await blockUser(u.id, s.payload.withUserId);
         await resetSession(u.id);
-        await ctx.reply(t(lang, "chat.blocked"));
+        await ctx.reply(t(lang, "chat.blocked"), { reply_markup: buildCodeHomeReplyKeyboard(lang) });
+        await resetChatPartner(ctx.api, s.payload.withUserId, u.id, "mystery.partnerLeft");
     });
     bot.callbackQuery("mystery:cancel", async (ctx) => {
         const u = await ensureDbUser(ctx);
@@ -1160,6 +2014,7 @@ export async function createBot() {
             return;
         const s = await getSession(u.id);
         await ctx.answerCallbackQuery();
+        await clearPressedInlineKeyboard(ctx);
         if (s.state !== "mystery_wait")
             return;
         await resetSession(u.id);
@@ -1173,6 +2028,12 @@ export async function createBot() {
             return;
         await ctx.answerCallbackQuery();
         const lang = langFromDb(u.language);
+        const s = await getSession(u.id);
+        if (isChatBusyState(s.state)) {
+            await ctx.reply(t(lang, "mystery.alreadyInChat"));
+            return;
+        }
+        await clearPressedInlineKeyboard(ctx);
         const kb = new InlineKeyboard()
             .text(mr(lang, "prefGender.m"), "mr:g:m")
             .text(mr(lang, "prefGender.f"), "mr:g:f")
@@ -1188,6 +2049,12 @@ export async function createBot() {
             return;
         await ctx.answerCallbackQuery();
         const lang = langFromDb(u.language);
+        const s = await getSession(u.id);
+        if (isChatBusyState(s.state)) {
+            await ctx.reply(t(lang, "mystery.alreadyInChat"));
+            return;
+        }
+        await clearPressedInlineKeyboard(ctx);
         const g = ctx.match[1];
         const kb = new InlineKeyboard()
             .text(mr(lang, "prefAge.close"), `mr:age:${g}:close`)
@@ -1201,6 +2068,12 @@ export async function createBot() {
             return;
         await ctx.answerCallbackQuery();
         const lang = langFromDb(u.language);
+        const s = await getSession(u.id);
+        if (isChatBusyState(s.state)) {
+            await ctx.reply(t(lang, "mystery.alreadyInChat"));
+            return;
+        }
+        await clearPressedInlineKeyboard(ctx);
         const g = ctx.match[1];
         const age = ctx.match[2];
         const kb = new InlineKeyboard()
@@ -1215,11 +2088,12 @@ export async function createBot() {
             return;
         await ctx.answerCallbackQuery();
         const lang = langFromDb(u.language);
+        await clearPressedInlineKeyboard(ctx);
         const soughtGender = ctx.match[1] === "any" ? null : ctx.match[1];
         const ageRangeClose = ctx.match[2] === "close";
         const wantSameCountry = ctx.match[3] === "yes";
         const s = await getSession(u.id);
-        if (s.state === "chat" || s.state === "mystery_wait" || s.state === "mystery_vote") {
+        if (isChatBusyState(s.state)) {
             await ctx.reply(t(lang, "mystery.alreadyInChat"));
             return;
         }
@@ -1230,6 +2104,13 @@ export async function createBot() {
         }
         const prfsMy = myProfile.preferences ?? {};
         await ctx.api.sendChatAction(ctx.chat.id, "typing").catch(() => { });
+        await setSession(u.id, {
+            state: "mystery_wait",
+            payload: { soughtGender, ageRangeClose, wantSameCountry, enteredAt: Date.now() },
+        });
+        const waitingSession = await getSession(u.id);
+        if (waitingSession.state !== "mystery_wait")
+            return;
         const partnerId = await findMysteryWaitUser({
             excludeUserId: u.id,
             myGender: myProfile.gender,
@@ -1243,22 +2124,9 @@ export async function createBot() {
             wantSameCountry,
         });
         if (partnerId !== null) {
-            const partnerUser = await getUserById(partnerId);
-            const partnerLang = partnerUser ? langFromDb(partnerUser.language) : "fa";
-            const partnerTgId = await getTelegramIdByUserId(partnerId);
-            const now = Date.now();
-            await setSession(u.id, { state: "chat", payload: { withUserId: partnerId, isMystery: true, startedAt: now } });
-            await setSession(partnerId, { state: "chat", payload: { withUserId: u.id, isMystery: true, startedAt: now } });
-            await ctx.reply(t(lang, "mystery.matched"));
-            if (partnerTgId) {
-                await ctx.api.sendMessage(partnerTgId, t(partnerLang, "mystery.matched")).catch(() => { });
-            }
+            await startMysteryChatPair(ctx, u.id, partnerId, lang);
         }
         else {
-            await setSession(u.id, {
-                state: "mystery_wait",
-                payload: { soughtGender, ageRangeClose, wantSameCountry, enteredAt: Date.now() },
-            });
             await ctx.reply(t(lang, "mystery.waiting"), {
                 reply_markup: new InlineKeyboard().text(t(lang, "mystery.cancel"), "mystery:cancel"),
             });
@@ -1269,6 +2137,7 @@ export async function createBot() {
         if (!u)
             return;
         await ctx.answerCallbackQuery();
+        await clearPressedInlineKeyboard(ctx);
         const s = await getSession(u.id);
         if (s.state !== "mystery_vote")
             return;
@@ -1290,15 +2159,16 @@ export async function createBot() {
             const myPhoto = await getPrimaryPhoto(u.id);
             const theirPhoto = await getPrimaryPhoto(vp.partnerId);
             await ctx.reply(t(lang, "mystery.bothYes"));
+            const myTgId = await getTelegramIdByUserId(u.id);
             if (theirProf) {
-                const cap = formatMatchProfileCaption(lang, theirProf);
+                const cap = formatMatchProfileCaption(lang, theirProf, partnerTgId);
                 if (theirPhoto)
                     await ctx.replyWithPhoto(theirPhoto, { caption: cap }).catch(() => { });
                 else
                     await ctx.reply(cap).catch(() => { });
             }
             if (partnerTgId && myProf) {
-                const cap2 = formatMatchProfileCaption(partnerLang, myProf);
+                const cap2 = formatMatchProfileCaption(partnerLang, myProf, myTgId);
                 await ctx.api.sendMessage(partnerTgId, t(partnerLang, "mystery.bothYes")).catch(() => { });
                 if (myPhoto)
                     await ctx.api.sendPhoto(partnerTgId, myPhoto, { caption: cap2 }).catch(() => { });
@@ -1315,6 +2185,7 @@ export async function createBot() {
         if (!u)
             return;
         await ctx.answerCallbackQuery();
+        await clearPressedInlineKeyboard(ctx);
         const s = await getSession(u.id);
         if (s.state !== "mystery_vote")
             return;
@@ -1343,12 +2214,36 @@ export async function createBot() {
             s.state === "admin_find" ||
             s.state === "admin_config_wait" ||
             s.state === "admin_diamond_wait" ||
+            s.state === "admin_profile_edit" ||
             s.state === "admin_msg_edit" ||
             s.state === "admin_send_user" ||
+            s.state === "admin_referral_setting_wait" ||
+            s.state === "admin_join_lock_add" ||
+            s.state === "admin_admin_add" ||
+            s.state === "admin_admin_remove" ||
             s.state === "admin_reward_meta" ||
-            s.state === "admin_reward_file") {
+            s.state === "admin_reward_file" ||
+            s.state === "admin_start_notify_setup") {
             await resetSession(u.id);
             await ctx.reply(t(lang, "admin.broadcastCancelled"));
+            return;
+        }
+        if (s.state === "chat_request") {
+            await cancelLinkedChatRequest(ctx.api, u.id, s);
+            await ctx.reply(t(lang, "chat.requestDeclined"), { reply_markup: buildCodeHomeReplyKeyboard(lang) });
+            return;
+        }
+        if (s.state === "discover_filter" || s.state === "discover_filter_input") {
+            if (s.state === "discover_filter_input") {
+                const filters = trimFilterUiState(s.payload.filters);
+                await setSession(u.id, { state: "discover_filter", payload: filters });
+                await replyDiscoverFilterView(ctx, lang, filters);
+            }
+            else {
+                await resetSession(u.id);
+                await sendMainMenuReply(ctx);
+            }
+            return;
         }
     });
     bot.callbackQuery(/^lang:(fa|en)$/, async (ctx) => {
@@ -1482,6 +2377,385 @@ export async function createBot() {
         await ctx.answerCallbackQuery();
         await sendMainMenuReply(ctx);
     });
+    bot.callbackQuery("df:city", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        const filters = { ...trimFilterUiState(s.payload), sameCity: !s.payload.sameCity };
+        await ctx.answerCallbackQuery();
+        await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+    });
+    bot.callbackQuery("dfm:quick", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        await ctx.answerCallbackQuery();
+        await clearPressedInlineKeyboard(ctx);
+        await discoverCore(ctx, u.id, quickDiscoverFilters());
+    });
+    bot.callbackQuery("dfm:advanced", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const lang = await getLang(ctx);
+        const filters = defaultDiscoverFilters();
+        await ctx.answerCallbackQuery();
+        await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+    });
+    bot.callbackQuery(/^df:screen:(main|who|where|interests)$/, async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        const screen = ctx.match?.[1];
+        const filters = { ...trimFilterUiState(s.payload), screen };
+        await ctx.answerCallbackQuery();
+        await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+    });
+    bot.callbackQuery("df:country", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        const filters = { ...trimFilterUiState(s.payload), sameCountry: !s.payload.sameCountry };
+        await ctx.answerCallbackQuery();
+        await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+    });
+    bot.callbackQuery("df:verified", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        const filters = { ...trimFilterUiState(s.payload), verifiedOnly: !s.payload.verifiedOnly };
+        await ctx.answerCallbackQuery();
+        await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+    });
+    bot.callbackQuery("df:photos", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        const filters = { ...trimFilterUiState(s.payload), photoOnly: !s.payload.photoOnly };
+        await ctx.answerCallbackQuery();
+        await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+    });
+    bot.callbackQuery("df:setcountry", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        if (hasFilterText(s.payload.country)) {
+            const filters = { ...trimFilterUiState(s.payload), country: null };
+            await ctx.answerCallbackQuery();
+            await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+            return;
+        }
+        await promptDiscoverFilterInput(ctx, u.id, lang, s.payload, "country");
+    });
+    bot.callbackQuery("df:setcountry:edit", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        await promptDiscoverFilterInput(ctx, u.id, lang, s.payload, "country");
+    });
+    bot.callbackQuery("df:addcity", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        if (hasFilterList(s.payload.includeCities)) {
+            const filters = { ...trimFilterUiState(s.payload), includeCities: [] };
+            await ctx.answerCallbackQuery();
+            await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+            return;
+        }
+        await promptDiscoverFilterInput(ctx, u.id, lang, s.payload, "include_cities");
+    });
+    bot.callbackQuery("df:addcity:edit", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        await promptDiscoverFilterInput(ctx, u.id, lang, s.payload, "include_cities");
+    });
+    bot.callbackQuery("df:excountry", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        if (hasFilterList(s.payload.excludeCountries)) {
+            const filters = { ...trimFilterUiState(s.payload), excludeCountries: [] };
+            await ctx.answerCallbackQuery();
+            await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+            return;
+        }
+        await promptDiscoverFilterInput(ctx, u.id, lang, s.payload, "exclude_countries");
+    });
+    bot.callbackQuery("df:excountry:edit", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        await promptDiscoverFilterInput(ctx, u.id, lang, s.payload, "exclude_countries");
+    });
+    bot.callbackQuery("df:excity", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        if (hasFilterList(s.payload.excludeCities)) {
+            const filters = { ...trimFilterUiState(s.payload), excludeCities: [] };
+            await ctx.answerCallbackQuery();
+            await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+            return;
+        }
+        await promptDiscoverFilterInput(ctx, u.id, lang, s.payload, "exclude_cities");
+    });
+    bot.callbackQuery("df:excity:edit", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        await promptDiscoverFilterInput(ctx, u.id, lang, s.payload, "exclude_cities");
+    });
+    bot.callbackQuery("df:age", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        const ageOrder = ["profile", "near", "18_25", "26_35", "36_plus", "any"];
+        const age = ageOrder[(ageOrder.indexOf(s.payload.age) + 1) % ageOrder.length];
+        const filters = { ...trimFilterUiState(s.payload), age, ageMin: null, ageMax: null };
+        await ctx.answerCallbackQuery();
+        await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+    });
+    bot.callbackQuery("df:agecustom", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        await setSession(u.id, {
+            state: "discover_filter_input",
+            payload: { filters: trimFilterUiState(s.payload), field: "age_range" },
+        });
+        await ctx.answerCallbackQuery();
+        await ctx.reply(discoverFilterPrompt(lang, "age_range"));
+    });
+    bot.callbackQuery(/^df:gender:(profile|male|female|other|any)$/, async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        const gender = ctx.match[1];
+        const filters = { ...trimFilterUiState(s.payload), gender };
+        await ctx.answerCallbackQuery();
+        await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+    });
+    bot.callbackQuery("df:looking", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        const lookingOrder = ["compatible", "friends", "dating", "any"];
+        const lookingFor = lookingOrder[(lookingOrder.indexOf(s.payload.lookingFor) + 1) % lookingOrder.length];
+        const filters = { ...trimFilterUiState(s.payload), lookingFor };
+        await ctx.answerCallbackQuery();
+        await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+    });
+    bot.callbackQuery("df:radius", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        const radiusOrder = ["profile", "10", "25", "50", "100", "any"];
+        const radius = radiusOrder[(radiusOrder.indexOf(s.payload.radius) + 1) % radiusOrder.length];
+        const filters = { ...trimFilterUiState(s.payload), radius };
+        await ctx.answerCallbackQuery();
+        await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+    });
+    bot.callbackQuery("df:recent", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        const order = ["any", "1", "7", "30"];
+        const recentActivity = order[(order.indexOf(s.payload.recentActivity) + 1) % order.length];
+        const filters = { ...trimFilterUiState(s.payload), recentActivity };
+        await ctx.answerCallbackQuery();
+        await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+    });
+    bot.callbackQuery("df:keyword", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        if (hasFilterText(s.payload.keyword)) {
+            const filters = { ...trimFilterUiState(s.payload), keyword: "" };
+            await ctx.answerCallbackQuery();
+            await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+            return;
+        }
+        await promptDiscoverFilterInput(ctx, u.id, lang, s.payload, "keyword");
+    });
+    bot.callbackQuery("df:keyword:edit", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        await promptDiscoverFilterInput(ctx, u.id, lang, s.payload, "keyword");
+    });
+    bot.callbackQuery("df:interests", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        const filters = { ...trimFilterUiState(s.payload), screen: "interests" };
+        await ctx.answerCallbackQuery();
+        await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+    });
+    bot.callbackQuery(/^dfi:(?!done$|reset$)(.+)$/, async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        const key = String(ctx.match?.[1]);
+        const current = new Set(s.payload.interests ?? []);
+        if (current.has(key))
+            current.delete(key);
+        else if (current.size < 6)
+            current.add(key);
+        const filters = {
+            ...trimFilterUiState(s.payload),
+            screen: "interests",
+            interests: Array.from(current),
+        };
+        await ctx.answerCallbackQuery();
+        await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+    });
+    bot.callbackQuery("dfi:reset", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        const filters = { ...trimFilterUiState(s.payload), screen: "interests", interests: [] };
+        await ctx.answerCallbackQuery();
+        await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+    });
+    bot.callbackQuery("dfi:done", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        const lang = await getLang(ctx);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        const filters = { ...trimFilterUiState(s.payload), screen: "main" };
+        await ctx.answerCallbackQuery();
+        await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+    });
+    bot.callbackQuery("df:reset", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const lang = await getLang(ctx);
+        const filters = defaultDiscoverFilters();
+        await ctx.answerCallbackQuery();
+        await saveAndEditDiscoverFilters(ctx, u.id, lang, filters);
+    });
+    bot.callbackQuery("df:cancel", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        await ctx.answerCallbackQuery();
+        await clearPressedInlineKeyboard(ctx);
+        await resetSession(u.id);
+        await sendMainMenuReply(ctx);
+    });
+    bot.callbackQuery("df:start", async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const s = await getSession(u.id);
+        if (s.state !== "discover_filter")
+            return void (await ctx.answerCallbackQuery());
+        await ctx.answerCallbackQuery();
+        await clearPressedInlineKeyboard(ctx);
+        await discoverCore(ctx, u.id, trimFilterUiState(s.payload));
+    });
     bot.callbackQuery(cb.discover, async (ctx) => {
         const u = await ensureDbUser(ctx);
         if (!u)
@@ -1502,6 +2776,16 @@ export async function createBot() {
             return;
         await ctx.answerCallbackQuery();
         await showLikers(ctx, u.id);
+    });
+    bot.callbackQuery(/^likers:(\d+)$/, async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const page = Number(ctx.match?.[1] ?? "0");
+        if (!Number.isFinite(page) || page < 0)
+            return;
+        await ctx.answerCallbackQuery();
+        await showLikers(ctx, u.id, page, { edit: true });
     });
     bot.callbackQuery(cb.share, async (ctx) => {
         const u = await ensureDbUser(ctx);
@@ -1724,8 +3008,16 @@ export async function createBot() {
             const x = await assertDiscoverContext(ctx);
             if (!x)
                 return void (await ctx.answerCallbackQuery());
-            await ctx.answerCallbackQuery();
+            await ctx.answerCallbackQuery({
+                text: t(x.lang, "discover.report.sent"),
+                show_alert: false,
+            });
             await createReport({ reporterId: x.u.id, targetId: x.targetId, reason: "user_reported" });
+            await notifyAdminsOfReport(ctx, {
+                reporterId: x.u.id,
+                targetId: x.targetId,
+                reason: "user_reported",
+            });
             await setSession(x.u.id, {
                 state: "discover",
                 payload: { ...x.s.payload, idx: x.s.payload.idx + 1, sub: "main" },
@@ -1747,14 +3039,95 @@ export async function createBot() {
             return;
         const otherId = Number(ctx.match?.[1]);
         const lang = await getLang(ctx);
+        const currentSession = await getSession(u.id);
+        if (isChatBusyState(currentSession.state)) {
+            await ctx.answerCallbackQuery({
+                text: currentSession.state === "chat_request" ? t(lang, "chat.requestPending") : t(lang, "mystery.alreadyInChat"),
+                show_alert: true,
+            });
+            return;
+        }
         const ok = await hasMatchBetween(u.id, otherId);
         if (!ok) {
             await ctx.answerCallbackQuery({ text: t(lang, "matches.invalid"), show_alert: true });
             return;
         }
+        const otherSession = await getSession(otherId);
+        if (isChatBusyState(otherSession.state)) {
+            await ctx.answerCallbackQuery({ text: t(lang, "chat.userBusy"), show_alert: true });
+            return;
+        }
+        const otherTgId = await getTelegramIdByUserId(otherId);
+        if (!otherTgId) {
+            await ctx.answerCallbackQuery({ text: t(lang, "errors.generic"), show_alert: true });
+            return;
+        }
+        const otherUser = await getUserById(otherId);
+        const otherLang = otherUser ? langFromDb(otherUser.language) : "fa";
+        const myProfile = await getProfile(u.id);
+        const requesterName = myProfile?.display_name ?? (lang === "fa" ? "یک نفر" : "Someone");
+        const now = Date.now();
+        await setSession(u.id, { state: "chat_request", payload: { withUserId: otherId, direction: "outgoing", createdAt: now } });
+        await setSession(otherId, { state: "chat_request", payload: { withUserId: u.id, direction: "incoming", createdAt: now } });
         await ctx.answerCallbackQuery();
-        await setSession(u.id, { state: "chat", payload: { withUserId: otherId } });
-        await ctx.reply(t(lang, "chat.start"));
+        await clearPressedInlineKeyboard(ctx);
+        const kb = new InlineKeyboard()
+            .text(t(otherLang, "chat.requestAccept"), `mchat:accept:${u.id}`)
+            .text(t(otherLang, "chat.requestDecline"), `mchat:decline:${u.id}`);
+        try {
+            await ctx.api.sendMessage(otherTgId, tf(otherLang, "chat.requestIncoming", { name: requesterName }), { reply_markup: kb });
+        }
+        catch {
+            await cancelLinkedChatRequest(ctx.api, u.id, {
+                state: "chat_request",
+                payload: { withUserId: otherId, direction: "outgoing", createdAt: now },
+            });
+            await ctx.reply(t(lang, "errors.generic"));
+            return;
+        }
+        await ctx.reply(t(lang, "chat.requestSent"));
+    });
+    bot.callbackQuery(/^mchat:accept:(\d+)$/, async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const requesterId = Number(ctx.match?.[1]);
+        const lang = await getLang(ctx);
+        const s = await getSession(u.id);
+        if (s.state !== "chat_request" || s.payload.direction !== "incoming" || !sameUserId(s.payload.withUserId, requesterId)) {
+            await ctx.answerCallbackQuery({ text: t(lang, "matches.invalid"), show_alert: true });
+            return;
+        }
+        const requesterSession = await getSession(requesterId);
+        const ok = requesterSession.state === "chat_request" &&
+            requesterSession.payload.direction === "outgoing" &&
+            sameUserId(requesterSession.payload.withUserId, u.id) &&
+            (await hasMatchBetween(u.id, requesterId));
+        if (!ok) {
+            await resetSession(u.id);
+            await ctx.answerCallbackQuery({ text: t(lang, "chat.requestExpired"), show_alert: true });
+            await ctx.reply(t(lang, "chat.requestExpired"), { reply_markup: buildCodeHomeReplyKeyboard(lang) });
+            return;
+        }
+        await ctx.answerCallbackQuery();
+        await clearPressedInlineKeyboard(ctx);
+        await startAcceptedChat(ctx, u.id, requesterId, lang);
+    });
+    bot.callbackQuery(/^mchat:decline:(\d+)$/, async (ctx) => {
+        const u = await ensureDbUser(ctx);
+        if (!u)
+            return;
+        const requesterId = Number(ctx.match?.[1]);
+        const lang = await getLang(ctx);
+        const s = await getSession(u.id);
+        if (s.state !== "chat_request" || s.payload.direction !== "incoming" || !sameUserId(s.payload.withUserId, requesterId)) {
+            await ctx.answerCallbackQuery({ text: t(lang, "matches.invalid"), show_alert: true });
+            return;
+        }
+        await ctx.answerCallbackQuery();
+        await clearPressedInlineKeyboard(ctx);
+        await cancelLinkedChatRequest(ctx.api, u.id, s);
+        await ctx.reply(t(lang, "chat.requestDeclined"), { reply_markup: buildCodeHomeReplyKeyboard(lang) });
     });
     bot.callbackQuery(/^lkback:(\d+)$/, async (ctx) => {
         const u = await ensureDbUser(ctx);
@@ -2022,8 +3395,13 @@ export async function createBot() {
             s.state === "admin_find" ||
             s.state === "admin_config_wait" ||
             s.state === "admin_diamond_wait" ||
+            s.state === "admin_profile_edit" ||
             s.state === "admin_msg_edit" ||
             s.state === "admin_send_user" ||
+            s.state === "admin_referral_setting_wait" ||
+            s.state === "admin_join_lock_add" ||
+            s.state === "admin_admin_add" ||
+            s.state === "admin_admin_remove" ||
             s.state === "admin_reward_meta" ||
             s.state === "admin_reward_file" ||
             s.state === "admin_start_notify_setup")
@@ -2032,12 +3410,19 @@ export async function createBot() {
             return next();
         if (s.state === "idle" || s.state === "discover") {
             await ensureBotConfigSeeded();
-            const cfg = await getBotConfig();
             const action = matchCodeHomeAction(lang, ctx.msg.text.trim());
             if (action) {
                 if (s.state === "discover" && action !== "explore")
                     await resetSession(u.id);
                 await dispatchHomeAction(ctx, u, action);
+                return;
+            }
+            // If the session is stuck in discover but the text doesn't match any home
+            // menu action, escape back to the main menu rather than silently dropping
+            // the message. This is the recovery path for the race-condition freeze.
+            if (s.state === "discover") {
+                await resetSession(u.id);
+                await sendMainMenuReply(ctx);
                 return;
             }
         }
@@ -2049,10 +3434,48 @@ export async function createBot() {
                 await startProfileWizard(ctx, u.id);
                 return;
             }
+            await sendMainMenuReply(ctx);
+            return;
+        }
+        const text = ctx.msg.text.trim();
+        if (s.state === "discover_filter_input") {
+            const nextFilters = { ...s.payload.filters, screen: "main" };
+            if (text === "/cancel") {
+                await setSession(u.id, { state: "discover_filter", payload: nextFilters });
+                await replyDiscoverFilterView(ctx, lang, nextFilters);
+                return;
+            }
+            if (s.payload.field === "country") {
+                nextFilters.country = text === "-" ? null : text.slice(0, 64);
+            }
+            else if (s.payload.field === "include_cities") {
+                nextFilters.includeCities = parseListInput(text);
+            }
+            else if (s.payload.field === "exclude_countries") {
+                nextFilters.excludeCountries = parseListInput(text);
+            }
+            else if (s.payload.field === "exclude_cities") {
+                nextFilters.excludeCities = parseListInput(text);
+            }
+            else if (s.payload.field === "keyword") {
+                nextFilters.keyword = text === "-" ? "" : text.slice(0, 80);
+            }
+            else {
+                const range = parseAgeRangeInput(text);
+                if (!range) {
+                    await ctx.reply(t(lang, "discover.filter.input.ageRangeInvalid"));
+                    await ctx.reply(discoverFilterPrompt(lang, s.payload.field));
+                    return;
+                }
+                nextFilters.ageMin = range.min;
+                nextFilters.ageMax = range.max;
+            }
+            await setSession(u.id, { state: "discover_filter", payload: nextFilters });
+            await replyDiscoverFilterView(ctx, lang, nextFilters);
+            return;
         }
         if (s.state !== "profile_wizard")
             return;
-        const text = ctx.msg.text.trim();
         const payload = s.payload;
         if (payload.step === "name") {
             payload.draft.displayName = text.slice(0, 32);
@@ -2423,6 +3846,7 @@ export async function createBot() {
             : "/profile /discover /matches\nLeave chat: /exit • Block: /block");
     });
     setupAdmin(bot);
+    setupButtonEditor(bot);
     await setupUx(bot);
     setInterval(async () => {
         try {
@@ -2448,9 +3872,16 @@ export async function createBot() {
                 }
                 catch { }
             }
+            const inactiveChats = await listInactiveMysteryChats(Date.now() - 3 * 60 * 1000);
+            for (const chat of inactiveChats) {
+                try {
+                    await endInactiveMysteryChat(bot.api, chat.userId, chat.partnerId);
+                }
+                catch { }
+            }
         }
         catch { }
-    }, 5 * 60 * 1000);
+    }, 60 * 1000);
     return bot;
 }
 function adminLangFromCtx(ctx) {

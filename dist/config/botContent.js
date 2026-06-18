@@ -110,7 +110,7 @@ export const DEFAULT_BOT_CONFIG = {
                 { action: "explore", fa: "جستجوی پارتنر 🔍", en: "Find Partner 🔍" },
             ],
             [
-                { action: "mystery_room", fa: "Mystery Room 🎭", en: "Mystery Room 🎭" },
+                { action: "mystery_room", fa: "Mystery Room 🎭 | چت سریع", en: "Mystery Room 🎭 | Quick Chat" },
             ],
             [
                 { action: "settings", fa: "پنل کاربری ⚙️", en: "Settings ⚙️" },

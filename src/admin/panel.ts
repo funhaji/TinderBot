@@ -57,6 +57,7 @@ import {
   upsertProfile,
   updateUserBadges,
 } from "../db/repo.js";
+import { handleButtonEditMessage } from "./buttonEditor.js";
 
 const REP_PAGE = 5;
 
@@ -99,6 +100,7 @@ const adm = {
   dimg: "adm:dimg",
   dimd: "adm:dimd",
   editMessages: "adm:msgedit",
+  buttonEditor: "btnedit:menu",
   msgPick: (key: string) => `adm:msp:${key}`,
   sendUser: "adm:su",
   rewardNew: "adm:rw",
@@ -381,6 +383,8 @@ export function adminPageKb(lang: Language, page: number): InlineKeyboard {
       .text(t(lang, "admin.botConfig"), adm.cfg)
       .row()
       .text(t(lang, "admin.editMessages"), adm.editMessages)
+      .row()
+      .text("✏️ " + (lang === "fa" ? "ویرایش دکمه‌ها" : "Edit Buttons"), adm.buttonEditor)
       .row()
       .text(t(lang, "admin.referralRewards"), adm.rewardNew)
       .text(t(lang, "admin.rewardList"), adm.rewardList)
@@ -786,6 +790,11 @@ export async function tryHandleAdminFollowupMessage(
     const ids = await listDynamicPanelAdminIds();
     await ctx.reply(tf(lang, "admin.adminListBody", { ids: ids.length ? ids.join(", ") : "—" }));
     return true;
+  }
+
+  // Handle button editor messages
+  if (s.state === "admin_button_edit") {
+    return await handleButtonEditMessage(ctx, u, s, lang);
   }
 
   return false;

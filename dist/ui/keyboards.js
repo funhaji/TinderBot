@@ -44,6 +44,7 @@ export const cb = {
     swipeReport: "sw:report",
     matchChat: (userId) => `mchat:${userId}`,
     likerLikeBack: (userId) => `lkback:${userId}`,
+    likersPage: (page) => `likers:${page}`,
 };
 export function langKeyboard() {
     return new InlineKeyboard()

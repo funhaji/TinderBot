@@ -5,6 +5,7 @@ import {
   setupAdmin,
   tryHandleAdminFollowupMessage,
 } from "./admin/panel.js";
+import { setupButtonEditor } from "./admin/buttonEditor.js";
 import { ensureBotConfigSeeded, getBotConfig, getBotMsg, labelForLang } from "./config/botContent.js";
 import type { HomeMenuAction } from "./config/botContent.js";
 import { config } from "./config.js";
@@ -1543,9 +1544,28 @@ async function handleSwipe(ctx: MyContext, direction: 1 | 2) {
         const myP = await getProfile(u.id);
         const targetUser = await getUserById(targetId);
         const tl = langFromDb(targetUser?.language ?? "en");
-        await ctx.api
-          .sendMessage(likeTg, `${myP?.display_name ?? (tl === "fa" ? "یک نفر" : "Someone")} ❤️`)
-          .catch(() => {});
+        
+        if (!myP) {
+          await ctx.api
+            .sendMessage(likeTg, `${(tl === "fa" ? "یک نفر" : "Someone")} ❤️`)
+            .catch(() => {});
+        } else {
+          // Improved notification with city, country, gender
+          const genderLabel = myP.gender 
+            ? t(tl, `profile.gender.${myP.gender}`)
+            : (tl === "fa" ? "یک نفر" : "Someone");
+          
+          const city = myP.city || (tl === "fa" ? "شهر نامشخص" : "Unknown city");
+          const country = myP.preferences?.country || (tl === "fa" ? "کشور نامشخص" : "Unknown country");
+          
+          const message = tf(tl, "like.notification", {
+            gender: genderLabel,
+            city,
+            country,
+          });
+          
+          await ctx.api.sendMessage(likeTg, message).catch(() => {});
+        }
       }
     }
     const mutual = await hasLiked(targetId, u.id);
@@ -1975,18 +1995,26 @@ export async function createBot() {
     }
     if (s.payload.isMystery) {
       if (matchesChatButton(txt, "chat.sendId")) {
+        const myUsername = ctx.from?.username;
         const myTg = ctx.from?.id;
         const partnerId = s.payload.withUserId;
         const partnerTg = await getTelegramIdByUserId(partnerId);
         const partnerUser = await getUserById(partnerId);
         const partnerLang = partnerUser ? langFromDb(partnerUser.language) : chatLang;
-        if (myTg) {
-          await ctx.reply(tf(chatLang, "chat.idSent", { id: String(myTg) }));
-          if (partnerTg) {
-            await ctx.api
-              .sendMessage(partnerTg, tf(partnerLang, "chat.idReceived", { id: String(myTg) }))
-              .catch(() => {});
-          }
+        
+        if (!myUsername) {
+          // User has no username
+          await ctx.reply(t(chatLang, "chat.noUsername"));
+          return;
+        }
+        
+        const usernameFormatted = `@${myUsername}`;
+        await ctx.reply(tf(chatLang, "chat.idSentUsername", { username: usernameFormatted }));
+        
+        if (partnerTg) {
+          await ctx.api
+            .sendMessage(partnerTg, tf(partnerLang, "chat.idReceivedUsername", { username: usernameFormatted }))
+            .catch(() => {});
         }
         return;
       }
@@ -3958,6 +3986,7 @@ export async function createBot() {
   });
 
   setupAdmin(bot);
+  setupButtonEditor(bot);
 
   await setupUx(bot);
 

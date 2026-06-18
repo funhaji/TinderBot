@@ -80,10 +80,18 @@ export async function findMysteryWaitUser(params) {
             const theirSoughtGender = pl.soughtGender ?? null;
             const theirAgeRangeClose = pl.ageRangeClose === true;
             const theirWantSameCountry = pl.wantSameCountry === true;
-            if (!orientationMutualOk(params.myOrientation, params.myGender, theirPrefs.orientation ?? null, row.gender)) {
+            const bothWantFastAny = !params.soughtGender &&
+                !params.ageRangeClose &&
+                !params.wantSameCountry &&
+                !theirSoughtGender &&
+                !theirAgeRangeClose &&
+                !theirWantSameCountry;
+            if (!bothWantFastAny &&
+                !orientationMutualOk(params.myOrientation, params.myGender, theirPrefs.orientation ?? null, row.gender)) {
                 continue;
             }
-            if (!ageWindowOverlaps(params.myAge, params.myAgeMin, params.myAgeMax, Number(row.age), theirPrefs.age_min, theirPrefs.age_max)) {
+            if (!bothWantFastAny &&
+                !ageWindowOverlaps(params.myAge, params.myAgeMin, params.myAgeMax, Number(row.age), theirPrefs.age_min, theirPrefs.age_max)) {
                 continue;
             }
             if (!mysterySoughtGenderMatches(params.soughtGender, row.gender))
@@ -133,6 +141,27 @@ export async function expireMysteryVoteSessions() {
     const ids = res.rows.map((r) => r.user_id);
     await query(`UPDATE sessions SET state='idle', payload='{}'::jsonb, updated_at=now()
      WHERE user_id = ANY($1::int[])`, [ids]);
+    return res.rows.map((r) => ({
+        userId: r.user_id,
+        telegramId: Number(r.telegram_id),
+        language: r.language,
+        partnerId: r.partner_id,
+    }));
+}
+export async function listInactiveMysteryChats(cutoffMs) {
+    const res = await query(`SELECT s.user_id, u.telegram_id::text, COALESCE(u.language, 'fa') AS language,
+            (s.payload->>'withUserId')::int AS partner_id
+     FROM sessions s
+     JOIN users u ON u.id = s.user_id
+     WHERE s.state = 'chat'
+       AND s.payload->>'isMystery' = 'true'
+       AND (s.payload->>'withUserId') IS NOT NULL
+       AND COALESCE(
+         (s.payload->>'lastActivityAt')::bigint,
+         (s.payload->>'startedAt')::bigint,
+         floor(extract(epoch from s.updated_at) * 1000)::bigint
+       ) < $1
+     ORDER BY s.updated_at ASC`, [cutoffMs]);
     return res.rows.map((r) => ({
         userId: r.user_id,
         telegramId: Number(r.telegram_id),
@@ -380,8 +409,33 @@ export async function discoveryCandidates(params) {
       AND a.id IS NULL
       AND bl.id IS NULL
       AND h.id IS NULL
-      AND p.age >= COALESCE((me.preferences->>'age_min')::int, 15)
-      AND p.age <= COALESCE((me.preferences->>'age_max')::int, 99)
+      AND (
+        (
+          ($4::int IS NOT NULL OR $5::int IS NOT NULL)
+          AND p.age >= COALESCE($4::int, 18)
+          AND p.age <= COALESCE($5::int, 99)
+        )
+        OR (
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = 'any'
+        )
+        OR (
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = 'near' AND ABS(p.age - me.age) <= 5
+        )
+        OR (
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = '18_25' AND p.age BETWEEN 18 AND 25
+        )
+        OR (
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = '26_35' AND p.age BETWEEN 26 AND 35
+        )
+        OR (
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = '36_plus' AND p.age >= 36
+        )
+        OR (
+          $4::int IS NULL AND $5::int IS NULL AND $6::text = 'profile'
+          AND p.age >= COALESCE((me.preferences->>'age_min')::int, 15)
+          AND p.age <= COALESCE((me.preferences->>'age_max')::int, 99)
+        )
+      )
       AND me.age >= COALESCE((p.preferences->>'age_min')::int, 15)
       AND me.age <= COALESCE((p.preferences->>'age_max')::int, 99)
       AND orientation_mutual_ok(
@@ -391,14 +445,20 @@ export async function discoveryCandidates(params) {
         p.gender::text
       )
       AND (
-        me.preferences->'seek_genders' IS NULL
-        OR jsonb_typeof(me.preferences->'seek_genders') <> 'array'
-        OR jsonb_array_length(COALESCE(me.preferences->'seek_genders', '[]'::jsonb)) = 0
-        OR p.gender IS NULL
+        $7::text = 'any'
+        OR ($7::text = 'male' AND profile_phys_sex(p.gender::text) = 'm')
+        OR ($7::text = 'female' AND profile_phys_sex(p.gender::text) = 'f')
+        OR ($7::text = 'other' AND profile_phys_sex(p.gender::text) IS NULL)
         OR (
-          (me.preferences->'seek_genders' @> '["m"]'::jsonb AND profile_phys_sex(p.gender::text) = 'm')
-          OR (me.preferences->'seek_genders' @> '["f"]'::jsonb AND profile_phys_sex(p.gender::text) = 'f')
-          OR (me.preferences->'seek_genders' @> '["x"]'::jsonb AND profile_phys_sex(p.gender::text) IS NULL)
+          me.preferences->'seek_genders' IS NULL
+          OR jsonb_typeof(me.preferences->'seek_genders') <> 'array'
+          OR jsonb_array_length(COALESCE(me.preferences->'seek_genders', '[]'::jsonb)) = 0
+          OR p.gender IS NULL
+          OR (
+            (me.preferences->'seek_genders' @> '["m"]'::jsonb AND profile_phys_sex(p.gender::text) = 'm')
+            OR (me.preferences->'seek_genders' @> '["f"]'::jsonb AND profile_phys_sex(p.gender::text) = 'f')
+            OR (me.preferences->'seek_genders' @> '["x"]'::jsonb AND profile_phys_sex(p.gender::text) IS NULL)
+          )
         )
       )
       AND (
@@ -413,9 +473,23 @@ export async function discoveryCandidates(params) {
         )
       )
       AND (
-        COALESCE(me.preferences->>'looking_for', 'both') = 'both'
-        OR COALESCE(p.preferences->>'looking_for', 'both') = 'both'
-        OR COALESCE(me.preferences->>'looking_for', 'both') = COALESCE(p.preferences->>'looking_for', 'both')
+        $15::text = 'any'
+        OR (
+          $15::text = 'compatible'
+          AND (
+            COALESCE(me.preferences->>'looking_for', 'both') = 'both'
+            OR COALESCE(p.preferences->>'looking_for', 'both') = 'both'
+            OR COALESCE(me.preferences->>'looking_for', 'both') = COALESCE(p.preferences->>'looking_for', 'both')
+          )
+        )
+        OR (
+          $15::text = 'friends'
+          AND COALESCE(p.preferences->>'looking_for', 'both') IN ('friends', 'both')
+        )
+        OR (
+          $15::text = 'dating'
+          AND COALESCE(p.preferences->>'looking_for', 'both') IN ('dating', 'both')
+        )
       )
       AND (
         me.location_lat IS NULL OR me.location_lon IS NULL OR p.location_lat IS NULL OR p.location_lon IS NULL
@@ -429,20 +503,71 @@ export async function discoveryCandidates(params) {
               * sin(radians(p.location_lat::double precision))
             ))
           )
-        ) <= LEAST(
-          $3::double precision,
-          COALESCE((me.preferences->>'discovery_radius_m')::double precision, $3::double precision)
-        )
+        ) <= $3::double precision
       )
       AND (
-        COALESCE((me.preferences->>'prefer_same_country')::boolean, false) = false
+        $8::boolean = false
+        OR COALESCE(me.city, '') = ''
+        OR LOWER(COALESCE(p.city, '')) = LOWER(COALESCE(me.city, ''))
+      )
+      AND (
+        $9::boolean = false
         OR COALESCE(me.preferences->>'country', '') = ''
         OR LOWER(COALESCE(p.preferences->>'country', '')) = LOWER(COALESCE(me.preferences->>'country', ''))
       )
+      AND (
+        $10::text IS NULL
+        OR $10::text = ''
+        OR LOWER(COALESCE(p.preferences->>'country', '')) = $10::text
+      )
+      AND (
+        COALESCE(array_length($11::text[], 1), 0) = 0
+        OR LOWER(COALESCE(p.city, '')) = ANY($11::text[])
+      )
+      AND (
+        COALESCE(array_length($12::text[], 1), 0) = 0
+        OR LOWER(COALESCE(p.preferences->>'country', '')) <> ALL($12::text[])
+      )
+      AND (
+        COALESCE(array_length($13::text[], 1), 0) = 0
+        OR LOWER(COALESCE(p.city, '')) <> ALL($13::text[])
+      )
+      AND (
+        $14::boolean = false
+        OR u.badge_verified = true
+      )
+      AND (
+        $16::int IS NULL
+        OR u.last_seen_at > now() - make_interval(days => $16::int)
+      )
+      AND (
+        $17::boolean = false
+        OR EXISTS (SELECT 1 FROM photos ph WHERE ph.user_id = u.id)
+      )
+      AND (
+        $18::text IS NULL
+        OR $18::text = ''
+        OR (
+          p.display_name ILIKE '%' || $18::text || '%'
+          OR p.bio ILIKE '%' || $18::text || '%'
+          OR COALESCE(p.preferences->>'personal_traits', '') ILIKE '%' || $18::text || '%'
+          OR COALESCE(p.preferences->>'partner_traits', '') ILIKE '%' || $18::text || '%'
+        )
+      )
+      AND (
+        COALESCE(array_length($19::text[], 1), 0) = 0
+        OR EXISTS (
+          SELECT 1
+          FROM user_interests ui
+          JOIN interests i ON i.id = ui.interest_id
+          WHERE ui.user_id = u.id
+            AND i.key = ANY($19::text[])
+        )
+      )
     ORDER BY
       CASE
-        WHEN COALESCE(me.preferences->>'country', '') != ''
-          AND LOWER(COALESCE(p.preferences->>'country', '')) = LOWER(COALESCE(me.preferences->>'country', ''))
+        WHEN COALESCE(me.city, '') != ''
+          AND LOWER(COALESCE(p.city, '')) = LOWER(COALESCE(me.city, ''))
         THEN 0 ELSE 1
       END,
       CASE
@@ -463,57 +588,51 @@ export async function discoveryCandidates(params) {
       END ASC NULLS LAST,
       p.updated_at DESC
     LIMIT $2
-  `, [params.meId, params.limit, params.radiusMeters]);
+  `, [
+        params.meId,
+        params.limit,
+        params.radiusMeters,
+        params.ageMin ?? null,
+        params.ageMax ?? null,
+        params.ageFilter ?? "profile",
+        params.genderFilter ?? "profile",
+        params.sameCity === true,
+        params.sameCountry === true,
+        params.country?.trim().toLowerCase() || null,
+        (params.includeCities ?? []).map((v) => v.trim().toLowerCase()).filter(Boolean),
+        (params.excludeCountries ?? []).map((v) => v.trim().toLowerCase()).filter(Boolean),
+        (params.excludeCities ?? []).map((v) => v.trim().toLowerCase()).filter(Boolean),
+        params.verifiedOnly === true,
+        params.lookingForFilter ?? "compatible",
+        params.recentActivityDays ?? null,
+        params.photoOnly === true,
+        params.keyword?.trim() || null,
+        (params.interestKeys ?? []).filter(Boolean),
+    ]);
     return res.rows.map((r) => r.id);
 }
 export async function listLikersNotMatched(userId) {
     const res = await query(`
-    SELECT s.swiper_id
-    FROM swipes s
-    JOIN profiles me ON me.user_id = $1
-    JOIN profiles lik ON lik.user_id = s.swiper_id
-    WHERE s.target_id = $1 AND s.direction = 1
-      AND orientation_mutual_ok(
-        lik.preferences->>'orientation',
-        lik.gender::text,
-        me.preferences->>'orientation',
-        me.gender::text
-      )
-      AND (
-        me.preferences->'seek_genders' IS NULL
-        OR jsonb_typeof(me.preferences->'seek_genders') <> 'array'
-        OR jsonb_array_length(COALESCE(me.preferences->'seek_genders', '[]'::jsonb)) = 0
-        OR lik.gender IS NULL
-        OR (
-          (me.preferences->'seek_genders' @> '["m"]'::jsonb AND profile_phys_sex(lik.gender::text) = 'm')
-          OR (me.preferences->'seek_genders' @> '["f"]'::jsonb AND profile_phys_sex(lik.gender::text) = 'f')
-          OR (me.preferences->'seek_genders' @> '["x"]'::jsonb AND profile_phys_sex(lik.gender::text) IS NULL)
+    SELECT recent.swiper_id
+    FROM (
+      SELECT s.swiper_id, MAX(s.created_at) AS latest_at
+      FROM swipes s
+      WHERE s.target_id = $1 AND s.direction = 1
+        AND NOT EXISTS (
+          SELECT 1 FROM matches m
+          WHERE m.unmatched_at IS NULL
+            AND (
+              (m.user_a = $1 AND m.user_b = s.swiper_id)
+              OR (m.user_a = s.swiper_id AND m.user_b = $1)
+            )
         )
-      )
-      AND (
-        lik.preferences->'seek_genders' IS NULL
-        OR jsonb_typeof(lik.preferences->'seek_genders') <> 'array'
-        OR jsonb_array_length(COALESCE(lik.preferences->'seek_genders', '[]'::jsonb)) = 0
-        OR me.gender IS NULL
-        OR (
-          (lik.preferences->'seek_genders' @> '["m"]'::jsonb AND profile_phys_sex(me.gender::text) = 'm')
-          OR (lik.preferences->'seek_genders' @> '["f"]'::jsonb AND profile_phys_sex(me.gender::text) = 'f')
-          OR (lik.preferences->'seek_genders' @> '["x"]'::jsonb AND profile_phys_sex(me.gender::text) IS NULL)
-        )
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM matches m
-        WHERE m.unmatched_at IS NULL
-          AND (
-            (m.user_a = $1 AND m.user_b = s.swiper_id)
-            OR (m.user_a = s.swiper_id AND m.user_b = $1)
-          )
-      )
-      AND NOT EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = $1 AND b.blocked_id = s.swiper_id)
-      AND NOT EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = s.swiper_id AND b.blocked_id = $1)
-      AND EXISTS (SELECT 1 FROM users u WHERE u.id = s.swiper_id AND u.is_banned = false)
-    ORDER BY s.created_at DESC
-    LIMIT 30
+        AND NOT EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = $1 AND b.blocked_id = s.swiper_id)
+        AND NOT EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = s.swiper_id AND b.blocked_id = $1)
+        AND EXISTS (SELECT 1 FROM users u WHERE u.id = s.swiper_id AND u.is_banned = false)
+      GROUP BY s.swiper_id
+    ) recent
+    ORDER BY recent.latest_at DESC
+    LIMIT 100
   `, [userId]);
     return res.rows.map((r) => r.swiper_id);
 }
@@ -558,6 +677,20 @@ export async function getSystemSettingNumber(key, defaultVal) {
     }
     return defaultVal;
 }
+export async function getSystemSettingString(key, defaultVal) {
+    const res = await query(`SELECT value_json FROM system_settings WHERE key = $1`, [key]);
+    const v = res.rows[0]?.value_json;
+    if (typeof v === "string")
+        return v;
+    if (v == null)
+        return defaultVal;
+    return String(v);
+}
+export async function getSystemSettingJson(key, defaultVal) {
+    const res = await query(`SELECT value_json FROM system_settings WHERE key = $1`, [key]);
+    const v = res.rows[0]?.value_json;
+    return v ?? defaultVal;
+}
 export async function setSystemSetting(key, value) {
     await query(`INSERT INTO system_settings (key, value_json) VALUES ($1, $2::jsonb)
      ON CONFLICT (key) DO UPDATE SET value_json = EXCLUDED.value_json`, [key, JSON.stringify(value)]);
@@ -584,12 +717,20 @@ export async function pruneMessageLogs() {
 }
 export async function listMessageLogs(limit, offset) {
     const res = await query(`
-    SELECT id::text, direction, telegram_user_id::text, text_preview, update_type, created_at::text
+    SELECT id::text, direction, user_id::text, telegram_user_id::text, chat_id::text,
+           message_id::text, text_preview, update_type, payload, created_at::text
     FROM message_logs
     ORDER BY created_at DESC
     LIMIT $1 OFFSET $2
   `, [limit, offset]);
     return res.rows;
+}
+export async function getMessageLogById(id) {
+    const res = await query(`SELECT id::text, direction, user_id::text, telegram_user_id::text, chat_id::text,
+            message_id::text, text_preview, update_type, payload, created_at::text
+     FROM message_logs
+     WHERE id = $1`, [id]);
+    return res.rows[0] ?? null;
 }
 export async function purgeAllMessageLogs() {
     await query(`DELETE FROM message_logs`);
@@ -750,6 +891,19 @@ export async function insertReferralFileReward(params) {
 }
 export async function deleteReferralFileReward(id) {
     await query(`DELETE FROM referral_file_rewards WHERE id = $1`, [id]);
+}
+export async function updateUserBadges(params) {
+    const cur = await getUserById(params.userId);
+    if (!cur)
+        return;
+    await query(`UPDATE users
+     SET badge_verified = $2,
+         badge_vip = $3
+     WHERE id = $1`, [
+        params.userId,
+        typeof params.verified === "boolean" ? params.verified : cur.badge_verified,
+        typeof params.vip === "boolean" ? params.vip : cur.badge_vip,
+    ]);
 }
 export async function listUnclaimedReferralFileRewardsForUser(userId) {
     const n = await countReferralsWithProfile(userId);

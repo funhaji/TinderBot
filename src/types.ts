@@ -26,7 +26,10 @@ export type SessionState =
   | { state: "admin_referral_setting_wait"; payload: { key: string } }
   | { state: "admin_join_lock_add"; payload: Record<string, unknown> }
   | { state: "admin_admin_add"; payload: Record<string, unknown> }
-  | { state: "admin_admin_remove"; payload: Record<string, unknown> };
+  | { state: "admin_admin_remove"; payload: Record<string, unknown> }
+  | { state: "admin_button_edit"; payload: { section: string; row: number; col: number; step: "fa" | "en"; textFa?: string } }
+  | { state: "admin_reminder_edit"; payload: { day: 3 | 7 | 14; step: "fa" | "en"; textFa?: string } }
+  | { state: "discover_filter_timeout"; payload: { filters: DiscoverFilterPayload; searchStart: number } };
 
 export type AdminProfileEditField = "display_name" | "age" | "city" | "country" | "bio";
 
