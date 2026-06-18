@@ -240,34 +240,52 @@ export async function handleButtonEditMessage(ctx: MyContext, u: { id: number },
 export function setupButtonEditor(bot: Bot<MyContext>) {
   // Main menu
   bot.callbackQuery(btn.menu, async (ctx) => {
-    if (!isPanelAdmin(ctx.from?.id)) return;
+    if (!isPanelAdmin(ctx.from?.id)) {
+      await ctx.answerCallbackQuery({ text: "Access denied", show_alert: true });
+      return;
+    }
     const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
     await showButtonEditorMenu(ctx, lang);
   });
   
   // Section selection
   bot.callbackQuery(/^btnedit:sec:(.+)$/, async (ctx) => {
-    if (!isPanelAdmin(ctx.from?.id)) return;
+    if (!isPanelAdmin(ctx.from?.id)) {
+      await ctx.answerCallbackQuery({ text: "Access denied", show_alert: true });
+      return;
+    }
     const section = ctx.match?.[1];
-    if (!section) return;
+    if (!section) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
     const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
     await showSectionButtons(ctx, section, lang);
   });
   
   // Button edit
   bot.callbackQuery(/^btnedit:btn:(.+):(\d+):(\d+)$/, async (ctx) => {
-    if (!isPanelAdmin(ctx.from?.id)) return;
+    if (!isPanelAdmin(ctx.from?.id)) {
+      await ctx.answerCallbackQuery({ text: "Access denied", show_alert: true });
+      return;
+    }
     const section = ctx.match?.[1];
     const row = parseInt(ctx.match?.[2] || "0");
     const col = parseInt(ctx.match?.[3] || "0");
-    if (!section) return;
+    if (!section) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
     const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
     await startEditButton(ctx, section, row, col, lang);
   });
   
   // Back button
   bot.callbackQuery(btn.back, async (ctx) => {
-    if (!isPanelAdmin(ctx.from?.id)) return;
+    if (!isPanelAdmin(ctx.from?.id)) {
+      await ctx.answerCallbackQuery({ text: "Access denied", show_alert: true });
+      return;
+    }
     const lang = await resolveAdminLang(ctx.from?.id, ctx.from?.language_code);
     await showButtonEditorMenu(ctx, lang);
   });
