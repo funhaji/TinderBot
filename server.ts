@@ -30,6 +30,8 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import fetch from "node-fetch";
 import { sql } from "./lib/db.js";
 import { fetchWithProxyFallback, getTelegramApiBases } from "./lib/proxy.js";
+import { startReminderScheduler } from "./lib/reminderScheduler.js";
+import { createBot } from "./src/bot.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "..", "public");
@@ -272,11 +274,22 @@ const server = http.createServer(async (req: IncomingMessage, res: ServerRespons
   }
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
   console.log(`[server] Listening on http://0.0.0.0:${PORT}`);
   setupWebhook().catch((err) => {
     console.error("[server] Webhook setup failed:", err);
   });
+  
+  // Start reminder scheduler
+  if (process.env.TELEGRAM_BOT_TOKEN) {
+    try {
+      const bot = await createBot();
+      startReminderScheduler(bot);
+      console.log("[server] Reminder scheduler started");
+    } catch (err) {
+      console.error("[server] Failed to start reminder scheduler:", err);
+    }
+  }
 });
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
