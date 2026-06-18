@@ -71,9 +71,6 @@ async function markReminderSent(userId: number, day: ReminderDay): Promise<void>
  * Get reminder message text from system settings
  */
 async function getReminderMessage(day: ReminderDay, lang: Language): Promise<string> {
-  const key = `reminder_${day}day_${lang}`;
-  const message = await getSystemSettingString(key);
-  
   // Fallback messages if not configured
   const defaults = {
     3: {
@@ -90,7 +87,11 @@ async function getReminderMessage(day: ReminderDay, lang: Language): Promise<str
     },
   };
 
-  return message || defaults[day][lang];
+  const key = `reminder_${day}day_${lang}`;
+  const defaultMessage = defaults[day][lang];
+  const message = await getSystemSettingString(key, defaultMessage);
+  
+  return message;
 }
 
 /**
@@ -98,7 +99,7 @@ async function getReminderMessage(day: ReminderDay, lang: Language): Promise<str
  */
 async function isReminderEnabled(day: ReminderDay): Promise<boolean> {
   const key = `reminder_${day}day_enabled`;
-  return await getSystemSettingBool(key);
+  return await getSystemSettingBool(key, true); // Default: enabled
 }
 
 /**
